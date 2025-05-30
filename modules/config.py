@@ -16,8 +16,8 @@ Esempio dai tuoi log `lms ls`:
 # modules/config.py (Esempio di come dovrebbe essere)
 LLM_MODELS = {
     #"Microsoft Phi 3.1 Mini": "phi-3.1-mini-4k-instruct:2",
-    "Google Gemma 2B": "gemma-2-2b-it:3",
-    "Meta Llama 3.1": "meta-llama-3.1-8b-instruct:3",
+    "Google Gemma 2B": "gemma-2-2b-it",
+    "Meta Llama 3.1": "meta-llama-3.1-8b-instruct",
 }
 
 # Verifica che LLM_MODELS non sia vuoto, altrimenti l'app potrebbe non funzionare come previsto.
