@@ -197,7 +197,6 @@ def main():
         st.session_state["general_edited_document"] = None
     if "original_csv_df" not in st.session_state:
         st.session_state["original_csv_df"] = None
-        # Linea aggiunta per risolvere l'errore:
     if "column_reports" not in st.session_state:
         st.session_state["column_reports"] = {}
 
@@ -763,7 +762,6 @@ def main():
                             # o da modules.analyisis_cvs se l'hai messa lì.
                             # Per questa risposta, assumo che sia in generazione_testo come suggerito prima.
                             try:
-                                from modules.generazione_testo import get_llm_overall_csv_comment
                                 st.session_state.overall_csv_comment = get_llm_overall_csv_comment(
                                     st.session_state["csv_analysis_report_df"],
                                     model_api_id_for_csv,  # Usa lo stesso modello dell'analisi colonne

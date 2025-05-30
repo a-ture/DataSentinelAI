@@ -1,91 +1,201 @@
-# modules/analyisis_cvs.py
 import pandas as pd
 import hashlib
-from typing import Dict, Any, Tuple
-from modules.generazione_testo import generate_report  # Assicurati che sia importato
-
-# All'inizio di modules/analyisis_cvs.py, aggiungi/verifica questi import:
 import json
-import openai  # Già usato implicitamente tramite generazione_testo
-import re  # Per l'estrazione del JSON dalla risposta LLM
+import openai
+import re
+from typing import Tuple
+from modules.generazione_testo import _init_lmstudio
 
 
-# Aggiungi questa funzione, ad esempio, in modules/generazione_testo.py (o dove hai get_llm_anonymization_method_suggestion)
-# Assicurati che openai, json, re siano importati in quel file.
+# Nel file dove hai definito get_llm_overall_csv_comment
+# (es. modules/generazione_testo.py o modules/analyisis_cvs.py)
+# Assicurati che pandas, openai, json, re siano importati in quel file.
+
+# Nel file dove hai definito get_llm_overall_csv_comment
+# (es. modules/generazione_testo.py o modules/analyisis_cvs.py)
+# Assicurati che pandas, openai, json, re siano importati in quel file.
+
+# Nel file dove hai definito get_llm_overall_csv_comment
+# (es. modules/generazione_testo.py o modules/analyisis_cvs.py)
+import pandas as pd
+import openai
+import json
+import re
+
+
+# Nel file dove hai definito get_llm_overall_csv_comment
+# (es. modules/generazione_testo.py o modules/analyisis_cvs.py)
+# Assicurati che pandas, openai, json, re siano importati in quel file.
+
+# Nel file dove hai definito get_llm_overall_csv_comment
+# (es. modules/generazione_testo.py o modules/analyisis_cvs.py)
+# Assicurati che pandas, openai, json, re siano importati in quel file.
 
 def get_llm_overall_csv_comment(
-        column_analysis_report: pd.DataFrame,  # Il DataFrame prodotto da analyze_and_anonymize_csv
+        column_analysis_report: pd.DataFrame,
         model_api_id: str,
         file_name: str = "Il file CSV analizzato"
 ) -> str:
-    """
-    Genera un commento generale sulla sensibilità dell'intero file CSV
-    basandosi sul report di analisi delle singole colonne.
-    """
     if column_analysis_report.empty:
         return "Nessun report di analisi disponibile per le colonne del CSV."
 
+    # --- 1. CALCOLA PRIVACY RISK SCORE ---
     num_total_cols_analyzed = len(column_analysis_report)
+    pii_mask = pd.Series([False] * num_total_cols_analyzed, index=column_analysis_report.index)  # Default a False
 
-    # Filtra per colonne che hanno PII o richiedono azione
-    problematic_cols = column_analysis_report[
-        (column_analysis_report["Problematica"].str.contains("PII rilevate", case=False, na=False)) &
-        (column_analysis_report["MetodoSuggerito"] != "nessuno")
-        ]
-    num_problematic_cols = len(problematic_cols)
+    if "LLM_HaTrovatoEntitaPII" in column_analysis_report.columns:
+        pii_mask = column_analysis_report["LLM_HaTrovatoEntitaPII"] == True
+    else:  # Fallback robusto
+        pii_mask = column_analysis_report["Problematica"].str.contains(
+            r"PII.*Rilevat", case=False, na=False, regex=True
+        )
 
-    if num_problematic_cols == 0:
-        return (f"Analisi completata per '{file_name}' ({num_total_cols_analyzed} colonne testuali). "
-                "Non sembrano esserci PII significative che richiedono anonimizzazione immediata secondo l'LLM.")
+    cols_with_pii_detected_df = column_analysis_report[pii_mask]
+    num_cols_with_pii = len(cols_with_pii_detected_df)
 
-    intro = (f"Il file '{file_name}' è stato analizzato ({num_total_cols_analyzed} colonne testuali) "
-             f"e sono state identificate problematiche di sensibilità in {num_problematic_cols} colonna/e.")
+    risk_pct = 0.0
+    if num_total_cols_analyzed > 0:
+        risk_pct = round((num_cols_with_pii / num_total_cols_analyzed) * 100, 1)
 
-    details_for_prompt = [intro]
-    details_for_prompt.append("\nDettagli dalle colonne più rilevanti:")
-    for idx, row in problematic_cols.head(min(3, num_problematic_cols)).iterrows():  # Dettagli per max 3 colonne
-        col = row["Colonna"]
-        problem = row["Problematica"].split('\n\n')[0]  # Prendi la parte della valutazione generale della colonna
-        method = row["MetodoSuggerito"]
-        details_for_prompt.append(f"- Colonna '{col}': {problem} (Metodo suggerito: {method})")
+    if risk_pct == 0:
+        risk_level_emoji = "🟢"
+        risk_level_text = "Basso"
+    elif risk_pct < 30:
+        risk_level_emoji = "🟡"
+        risk_level_text = "Medio"
+    else:
+        risk_level_emoji = "🛑"
+        risk_level_text = "Alto"
 
-    # Conteggio dei metodi suggeriti (escluso 'nessuno')
-    suggested_methods_counts = problematic_cols[problematic_cols["MetodoSuggerito"] != "nessuno"][
-        "MetodoSuggerito"].value_counts()
-    if not suggested_methods_counts.empty:
-        details_for_prompt.append("\nMetodi di anonimizzazione suggeriti con più frequenza:")
-        for method, count in suggested_methods_counts.items():
-            details_for_prompt.append(f"  - {method}: {count} volta/e")
+    risk_score_full_text = f"{risk_level_emoji} {risk_level_text} ({risk_pct} % delle colonne testuali analizzate contengono PII)"
 
-    aggregated_report_summary = "\n".join(details_for_prompt)
+    if num_cols_with_pii == 0:
+        return (f"### Valutazione Privacy – {risk_score_full_text}\n\n"
+                f"**Sintesi**\nL'analisi per '{file_name}' ({num_total_cols_analyzed} colonne) "
+                "indica che l’LLM **non ha rilevato PII specifiche**. Il dataset sembra presentare un rischio di privacy basso.")
 
+    # --- 2. COSTRUISCI MINI-TABELLA RIEPILOGATIVA (DATI PER L'LLM) ---
+    # Seleziona le colonne da mostrare nella tabella (es. quelle con PII e metodo non "nessuno", o le più rilevanti)
+    # display_cols_for_table_df = cols_with_pii_detected_df[cols_with_pii_detected_df["MetodoSuggerito"] != "nessuno"].head(5)
+    # if display_cols_for_table_df.empty:
+    display_cols_for_table_df = cols_with_pii_detected_df.head(5)  # Mostra fino a 5 colonne con PII
+
+    table_data_for_llm = []
+    for idx, row in display_cols_for_table_df.iterrows():
+        col_name = row['Colonna']
+        method_sugg = row['MetodoSuggerito']
+
+        problem_full_text = row["Problematica"]
+        sensitivity_reason = problem_full_text.split('\n\n')[0]  # Prendi la prima parte (valutazione generale colonna)
+        if sensitivity_reason.startswith(f"**Valutazione Complessiva Sensibilità Colonna '{col_name}':**"):
+            sensitivity_reason = sensitivity_reason.replace(
+                f"**Valutazione Complessiva Sensibilità Colonna '{col_name}':**", "").strip()
+        else:  # Fallback
+            pii_details_match = re.search(r"\*\*PII Specifiche Rilevate.*?\*\*:\s*(.*)", problem_full_text, re.DOTALL)
+            if pii_details_match:
+                sensitivity_reason = pii_details_match.group(1).split('\n-')[1][
+                                     :100].strip()  # Prendi il primo dettaglio PII
+            else:
+                sensitivity_reason = "Informazione sensibile rilevata"
+
+        sensitivity_reason_short = (sensitivity_reason[:70] + '...') if len(
+            sensitivity_reason) > 73 else sensitivity_reason
+        table_data_for_llm.append({
+            "Colonna": col_name,
+            "MetodoConsigliato": method_sugg,
+            "PercheSensibile": sensitivity_reason_short.replace('|', ' ')  # Evita problemi con Markdown
+        })
+
+    # Prepara il contesto informativo per l'LLM
+    context_for_llm_prompt = [
+        f"File Analizzato: {file_name}",
+        f"Colonne Testuali Totali Analizzate: {num_total_cols_analyzed}",
+        f"Colonne con PII Rilevate: {num_cols_with_pii}",
+        f"Percentuale Colonne con PII: {risk_pct}%",
+        f"Livello di Rischio Privacy Stimato: {risk_level_text}",
+        "\nDettaglio delle principali colonne con PII (fino a 5):"
+    ]
+    if not table_data_for_llm:
+        context_for_llm_prompt.append(
+            "- Nessuna colonna specifica da dettagliare ulteriormente oltre le statistiche generali.")
+    else:
+        for item in table_data_for_llm:
+            context_for_llm_prompt.append(
+                f"  - Colonna: '{item['Colonna']}', Metodo Suggerito: '{item['MetodoConsigliato']}', Motivo Sensibilità Principale: \"{item['PercheSensibile']}\""
+            )
+
+    aggregated_report_summary_for_llm = "\n".join(context_for_llm_prompt)
+
+    # --- 3. RAFFORZA IL PROMPT ALL'LLM ---
     prompt_to_llm = f"""
-Basandoti sul seguente riepilogo dell'analisi di un file CSV:
----
-{aggregated_report_summary}
----
+Basandoti sul seguente contesto derivato dall'analisi di un file CSV:
+--- CONTESTO DEL FILE ANALIZZATO ---
+{aggregated_report_summary_for_llm}
+--- FINE CONTESTO ---
 
-Fornisci un commento generale conciso (1-2 paragrafi) sulla sensibilità complessiva di questo file CSV. 
-Considera la natura e la frequenza delle PII rilevate e dei metodi di anonimizzazione suggeriti.
-Quali sono le implicazioni generali per la privacy e la gestione di questo dataset?
+Il tuo compito è generare un report di valutazione della privacy per questo file.
+Rispondi ESCLUSIVAMENTE in formato Markdown, seguendo scrupolosamente la struttura a quattro sezioni qui sotto. Usa le informazioni del contesto fornito dove appropriato (es. per il punteggio di rischio e la tabella). Per i rischi e le azioni, fornisci la tua analisi esperta.
+
+Struttura della risposta Markdown richiesta:
+
+### Valutazione Privacy – {risk_level_emoji} {risk_level_text} ({risk_pct} %)
+
+**Sintesi**
+(Scrivi qui 1-2 frasi di riepilogo che includano il punteggio di rischio e una valutazione generale della pericolosità del file basata sul contesto fornito.)
+
+**Tabella Riepilogativa delle Colonne Principali con PII**
+| Colonna | Metodo Consigliato | Perché Sensibile (Valutazione Colonna) |
+|---------|--------------------|------------------------------------------|
+{''.join([f"| {item['Colonna']} | {item['MetodoConsigliato']} | {item['PercheSensibile']} |" for item in table_data_for_llm]) if table_data_for_llm else "| Nessuna colonna specifica da elencare qui. | - | - |"}
+
+**Perché le colonne sopra indicate (e altre simili nel dataset) sono sensibili?**
+(Per ogni colonna listata nella tabella o per gruppi di colonne simili menzionate nel contesto, fornisci un bullet point conciso - max 1 riga per bullet - che spieghi la natura della loro sensibilità. Ad Esempio: "- La colonna 'NomeCompleto' è sensibile perché identifica direttamente una persona.")
+
+**Rischi Legali e Operativi Principali**
+(Elenca qui come bullet point un massimo di 3 rischi principali, legali o operativi, derivanti dalla presenza delle PII identificate nel contesto. Esempio: "- Possibile violazione art. 32 GDPR per mancanza di pseudonimizzazione adeguata.")
+
+**Azioni Immediate Raccomandate**
+(Elenca qui come bullet point azioni concrete e prioritarie da intraprendere per mitigare i rischi. Esempio: "- Applicare i metodi di anonimizzazione suggeriti o equivalenti per tutte le colonne con PII.")
+
+Non aggiungere altre sezioni o testo al di fuori di questa struttura.
 """
     try:
-        # Assicurati che _init_lmstudio sia stato chiamato se necessario (es. da generate_report)
-        # o che il server LLM sia già attivo e il modello caricato.
         response = openai.ChatCompletion.create(
             model=model_api_id,
             messages=[
                 {"role": "system",
-                 "content": "Sei un consulente per la privacy dei dati. Fornisci un commento finale sulla sensibilità di un dataset CSV."},
+                 "content": "Sei un esperto consulente di data privacy. Il tuo compito è generare un report Markdown strutturato e informativo basato sui dati di analisi di un file CSV che ti vengono forniti."},
                 {"role": "user", "content": prompt_to_llm.strip()}
             ],
-            temperature=0.4,
-            max_tokens=400
+            temperature=0.1,  # Molto bassa per seguire la struttura
+            max_tokens=1200  # Aumentato per permettere un output Markdown più completo
         )
-        comment = response.choices[0].message.content.strip()
-        return comment
+        structured_markdown_comment = response.choices[0].message.content.strip()
+
+        # Piccolo controllo per assicurarsi che l'output inizi come atteso (opzionale)
+        if not structured_markdown_comment.startswith("### Valutazione Privacy"):
+            # Fallback o aggiunta dell'intestazione se mancante, anche se l'LLM dovrebbe produrla
+            header_fallback = f"### Valutazione Privacy – {risk_score_full_text}\n\n"
+            # Potrebbe essere necessario un logging qui se l'LLM non segue la struttura
+            # print("WARN: L'LLM non ha prodotto l'intestazione attesa, aggiunta di fallback.")
+            if risk_pct == 0 and num_cols_with_pii == 0:  # Se il file è effettivamente a basso rischio
+                return (f"### Valutazione Privacy – {risk_score_full_text}\n\n"
+                        f"**Sintesi**\nL'analisi per '{file_name}' ({num_total_cols_analyzed} colonne) "
+                        "indica che l’LLM **non ha rilevato PII specifiche**. Il dataset sembra presentare un rischio di privacy basso e non richiede azioni di anonimizzazione immediate basate su questa analisi.")
+            # Se ci sono PII, ma l'LLM non ha formattato bene, almeno ritorna il contesto e chiedi all'LLM di riprovare o mostra un errore.
+            # Per ora, proviamo a restituire quello che l'LLM dà, sperando sia vicino.
+            # O si potrebbe tentare di forzare l'intestazione:
+            # if not structured_markdown_comment.strip().startswith("###"):
+            #    structured_markdown_comment = header_fallback + structured_markdown_comment
+
+        return structured_markdown_comment
+
     except Exception as e:
-        return f"Errore durante la generazione del commento generale sul file: {str(e)}"
+        # print(f"DEBUG: Errore in get_llm_overall_csv_comment: {e}") # Per debug
+        error_message = (f"### Valutazione Privacy – Errore\n\n"
+                         f"**Sintesi**\nImpossibile generare il commento finale a causa di un errore con l'LLM: {type(e).__name__}.\n"
+                         f"Dati preliminari: Rischio stimato '{risk_level_text}' ({risk_pct}%), {num_cols_with_pii}/{num_total_cols_analyzed} colonne con PII rilevate per '{file_name}'.")
+        return error_message
 
 def get_llm_anonymization_method_suggestion(
         column_name: str,
@@ -98,7 +208,9 @@ def get_llm_anonymization_method_suggestion(
     """
     Chiama l'LLM per ottenere un suggerimento sul metodo di anonimizzazione.
     """
-    ml_guidance = "Considera che l'obiettivo è anonimizzare i dati preservando il più possibile la loro utilità per analisi successive, come il Machine Learning. Scegli il metodo che offre il miglior compromesso tra privacy e mantenimento del segnale informativo." if for_ml_context else ""
+    ml_guidance = ("Considera che l'obiettivo è anonimizzare i dati preservando il più possibile la loro utilità per "
+                   "analisi successive, come il Machine Learning. Scegli il metodo che offre il miglior compromesso "
+                   "tra privacy e mantenimento del segnale informativo.") if for_ml_context else ""
 
     methods_list_str = ", ".join([f"'{m}'" for m in available_methods])
 
@@ -118,11 +230,6 @@ Rispondi ESCLUSIVAMENTE in formato JSON con le seguenti chiavi:
 - "method_reasoning": stringa (la tua motivazione)
 """
     try:
-        # Nota: _init_lmstudio da generazione_testo.py viene chiamato da generate_report.
-        # Se questa è la prima chiamata LLM per questo model_api_id o se il server non è attivo,
-        # potrebbe essere necessario un meccanismo simile a _init_lmstudio qui,
-        # oppure assicurarsi che generate_report sia stato chiamato prima.
-        # Per ora, assumiamo che il server sia pronto se generate_report è stato chiamato.
 
         response = openai.ChatCompletion.create(
             model=model_api_id,
@@ -171,7 +278,9 @@ Rispondi ESCLUSIVAMENTE in formato JSON con le seguenti chiavi:
 
 
 # modules/analyisis_cvs.py
-# ... (import esistenti e funzione get_llm_anonymization_method_suggestion come definite precedentemente) ...
+# ... (import esistenti) ...
+from modules.generazione_testo import _init_lmstudio  # Assicurati che sia importato
+
 
 def analyze_and_anonymize_csv(
         df: pd.DataFrame,
@@ -181,97 +290,105 @@ def analyze_and_anonymize_csv(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     report_rows = []
     df_out = df.copy()
+    _init_lmstudio(model_api_id)
 
     AVAILABLE_ANON_METHODS = ["hash", "mask", "generalize_date", "truncate", "nessuno"]
+    methods_list_str = ", ".join([f"'{m}'" for m in AVAILABLE_ANON_METHODS])
 
-    for col in df.columns:  # Itera sulle colonne del DataFrame fornito
-        # ... (definizione di vals e sample_preview come prima) ...
+    for col in df.columns:
+        # ... (vals, sample_preview, prompt_unificato come nella versione precedente) ...
         vals = df[col].dropna().astype(str).unique().tolist()[:sample_size]
         sample_preview = "; ".join(vals[:5]) + ("…" if len(vals) > 5 else "")
 
-        prompt_for_pii_detection = f"""
-Analizza il seguente testo per identificare informazioni personali identificabili (PII).
-Il testo proviene da una colonna CSV chiamata '{col}' e questi sono alcuni esempi di valori:
-{sample_preview}
-Restituisci un JSON con chiavi "found" (boolean), "entities" (lista di PII trovate con type, text, context, reasoning), e "summary" (un breve sommario che includa una valutazione generale della sensibilità del campione di dati fornito).
-"""
-        llm_resp_pii_detection = generate_report(prompt_for_pii_detection.strip(), model_api_id)
+        prompt_unificato = f"""
+Analizza la colonna CSV chiamata '{col}', i cui valori di esempio sono: "{sample_preview}".
+Considera che i dati potrebbero essere usati per Machine Learning, quindi cerca di bilanciare privacy e utilità.
+Fornisci la tua analisi ESCLUSIVAMENTE in formato JSON con la seguente struttura:
+{{
+  "is_sensitive_column": boolean,
+  "column_sensitivity_assessment": "stringa",
+  "pii_entities_found": [ {{ "text": "stringa_pii", "type": "tipo_pii", "reasoning_is_pii": "stringa" }} ],
+  "suggested_anonymization_method": "stringa", 
+  "method_reasoning": "stringa"
+}}
+"""  # Ho semplificato un po' la struttura JSON nel commento per chiarezza, ma il prompt è quello
 
-        actual_problem_description = ""
+        actual_problem_description = f"Analisi per la colonna '{col}' non ancora completata o fallita."
         actual_suggested_method = default_method_fallback
-        actual_method_reasoning = "In attesa di analisi e suggerimento LLM."
+        actual_method_reasoning = "Fallback a causa di errore o risposta LLM non interpretabile."
+        llm_found_pii_entities_flag = False  # NUOVA FLAG, inizializzata a False
 
-        if isinstance(llm_resp_pii_detection, dict):
-            pii_found_by_llm = llm_resp_pii_detection.get("found", False)
-            entities = llm_resp_pii_detection.get("entities", [])
-            summary_pii_detection = llm_resp_pii_detection.get("summary",
-                                                               "")  # Questo è il sommario contestuale per la colonna
+        try:
+            response = openai.ChatCompletion.create(
+                model=model_api_id,
+                messages=[
+                    {"role": "system",
+                     "content": "Sei un esperto di analisi dati e privacy. Rispondi sempre e solo con l'oggetto JSON richiesto."},
+                    {"role": "user", "content": prompt_unificato.strip()}
+                ],
+                temperature=0.2,
+                max_tokens=1024
+            )
+            raw_llm_output = response.choices[0].message.content.strip()
+            json_str_to_parse = None
+            match_md_json = re.search(r"```json\s*(\{.*?\})\s*```", raw_llm_output, re.DOTALL | re.IGNORECASE)
+            if match_md_json:
+                json_str_to_parse = match_md_json.group(1)
+            else:
+                start_index = raw_llm_output.find('{')
+                end_index = raw_llm_output.rfind('}')
+                if start_index != -1 and end_index != -1 and end_index > start_index:
+                    json_str_to_parse = raw_llm_output[start_index: end_index + 1]
 
-            # Costruisci la descrizione del problema
-            column_sensitivity_context = summary_pii_detection if summary_pii_detection else "Nessun sommario contestuale sulla sensibilità della colonna fornito dall'LLM."
+            if json_str_to_parse:
+                llm_data = json.loads(json_str_to_parse)
+                column_assessment = llm_data.get("column_sensitivity_assessment",
+                                                 "Nessuna valutazione contestuale fornita.")
+                pii_entities = llm_data.get("pii_entities_found", [])
 
-            if pii_found_by_llm and entities:
-                detailed_entity_descriptions = []
-                for ent in entities[:2]:
-                    text_val = ent.get('text', 'N/A')
-                    ent_type = ent.get('type', 'N/A')
-                    pii_sensitivity_reasoning = ent.get('reasoning', 'Nessuna motivazione specifica fornita.')
-                    detailed_entity_descriptions.append(
-                        f"'{text_val}' (tipo: {ent_type}). Motivo sensibilità PII: *{pii_sensitivity_reasoning}*"
+                # Imposta la flag se l'LLM dice che la colonna è sensibile E ha trovato entità PII
+                if llm_data.get("is_sensitive_column", False) and pii_entities:
+                    llm_found_pii_entities_flag = True  # <--- IMPOSTA LA FLAG QUI
+
+                # Costruzione di actual_problem_description (la logica può rimanere la stessa)
+                if llm_found_pii_entities_flag:  # Usa la flag per coerenza
+                    detailed_entity_descriptions = []
+                    for ent in pii_entities[:2]:
+                        text_val = ent.get('text', 'N/A')
+                        ent_type = ent.get('type', 'N/A')
+                        pii_reason = ent.get('reasoning_is_pii', 'N/D')
+                        detailed_entity_descriptions.append(
+                            f"'{text_val}' (tipo: {ent_type}). Motivo sensibilità PII: *{pii_reason}*"
+                        )
+                    problem_details_str = "\n- ".join(
+                        detailed_entity_descriptions) if detailed_entity_descriptions else "Dettagli PII non specificati."
+                    actual_problem_description = (
+                        f"**Valutazione Sensibilità Colonna '{col}':** {column_assessment}\n\n"
+                        f"**PII Specifiche Rilevate ({len(pii_entities)} entità totali):**\n- {problem_details_str}"
+                    )
+                elif llm_data.get("is_sensitive_column", False):
+                    actual_problem_description = (
+                        f"**Valutazione Sensibilità Colonna '{col}':** {column_assessment}\n\n"
+                        f"L'LLM indica che la colonna è sensibile ma non ha dettagliato PII specifiche."
+                    )
+                else:
+                    actual_problem_description = (
+                        f"**Valutazione Sensibilità Colonna '{col}':** {column_assessment}"
+                    # Qui non ci sono "PII Rilevate"
                     )
 
-                problem_details_str = "\n- ".join(
-                    detailed_entity_descriptions) if detailed_entity_descriptions else "Nessun dettaglio specifico sulle PII rilevate."
-
-                actual_problem_description = (
-                    f"**Valutazione Complessiva Sensibilità Colonna '{col}':** {column_sensitivity_context}\n\n"
-                    f"**PII Specifiche Rilevate ({len(entities)} entità totali):**\n- {problem_details_str}"
-                )
-
-                # Fase 2: Chiamata LLM per suggerimento metodo (come prima)
-                simple_entity_examples_list = [f"'{ent.get('text', 'N/A')[:50]}' (tipo: {ent.get('type', 'N/A')})" for
-                                               ent in entities[:2]]
-                problem_entities_preview = "; ".join(
-                    simple_entity_examples_list) if simple_entity_examples_list else "Nessun esempio specifico di entità PII disponibile"
-                pii_types_str = ", ".join(list(set(str(ent.get("type", "")).lower() for ent in entities)))
-                pii_summary_for_method_prompt = f"Tipi di PII: {pii_types_str}. Esempi: {problem_entities_preview}."
-
-                suggestion_result = get_llm_anonymization_method_suggestion(
-                    # ... (parametri come prima) ...
-                    column_name=col,
-                    sample_preview=sample_preview,
-                    pii_summary=pii_summary_for_method_prompt,
-                    available_methods=AVAILABLE_ANON_METHODS,
-                    model_api_id=model_api_id,
-                    for_ml_context=True
-                )
-                actual_suggested_method = suggestion_result.get("suggested_method", default_method_fallback)
-                actual_method_reasoning = suggestion_result.get("method_reasoning",
-                                                                "Errore nel ricevere la motivazione dall'LLM per il metodo.")
-                if actual_suggested_method == "error":
+                suggested_method_from_llm = llm_data.get("suggested_anonymization_method")
+                if suggested_method_from_llm in AVAILABLE_ANON_METHODS:
+                    actual_suggested_method = suggested_method_from_llm
+                else:
                     actual_suggested_method = default_method_fallback
+                actual_method_reasoning = llm_data.get("method_reasoning", "Nessuna motivazione fornita per il metodo.")
+            else:
+                actual_problem_description = f"Risposta LLM per colonna '{col}' non conteneva un JSON valido: {raw_llm_output}"
+        except Exception as e:
+            actual_problem_description = f"Errore durante l'analisi LLM della colonna '{col}': {str(e)}"
 
-            elif pii_found_by_llm and not entities:
-                actual_problem_description = f"**Valutazione Complessiva Sensibilità Colonna '{col}':** {column_sensitivity_context}\n\nL'LLM ha indicato PII generiche, ma senza fornire dettagli specifici."
-                actual_suggested_method = default_method_fallback
-                actual_method_reasoning = f"Applicato fallback: {default_method_fallback}."
-
-            elif not pii_found_by_llm:
-                actual_problem_description = f"**Valutazione Complessiva Sensibilità Colonna '{col}':** L'analisi LLM non ha rilevato PII specifiche in questi esempi. {summary_pii_detection if summary_pii_detection else ''}"
-                actual_suggested_method = "nessuno"
-                actual_method_reasoning = "Nessuna PII specifica trovata."
-
-            if "Error:" in summary_pii_detection and not actual_problem_description.startswith(
-                    f"**Valutazione Complessiva Sensibilità Colonna '{col}':**"):
-                actual_problem_description = f"**Valutazione Complessiva Sensibilità Colonna '{col}':** Errore da rilevamento PII: {summary_pii_detection}"
-                actual_method_reasoning = "Dettagli errore nel sommario. Applicato fallback."
-                actual_suggested_method = default_method_fallback
-        else:
-            actual_problem_description = f"**Valutazione Complessiva Sensibilità Colonna '{col}':** Risposta non valida da rilevamento PII."
-            actual_method_reasoning = "Impossibile determinare PII, applicato fallback."
-            actual_suggested_method = default_method_fallback
-
-        # ... (Logica di anonimizzazione per df_out) ...
+        # ... (Logica di anonimizzazione per df_out come prima) ...
         current_col_data = df_out[col].copy()
         if actual_suggested_method == "hash":
             df_out[col] = current_col_data.astype(str).apply(
@@ -281,7 +398,7 @@ Restituisci un JSON con chiavi "found" (boolean), "entities" (lista di PII trova
         elif actual_suggested_method == "generalize_date":
             try:
                 parsed_dates = pd.to_datetime(current_col_data, errors='coerce')
-                df_out[col] = parsed_dates.dt.to_period("M").astype(str).replace('NaT', pd.NA)
+                df_out[col] = parsed_dates.dt.to_period("M").astype(str).replace('nan', pd.NA).replace('NaT', pd.NA)
             except Exception:
                 df_out[col] = current_col_data
         elif actual_suggested_method == "truncate":
@@ -290,9 +407,10 @@ Restituisci un JSON con chiavi "found" (boolean), "entities" (lista di PII trova
         report_rows.append({
             "Colonna": col,
             "Esempi": sample_preview,
-            "Problematica": actual_problem_description,  # Ora include la valutazione contestuale + dettagli PII
+            "Problematica": actual_problem_description,
             "MetodoSuggerito": actual_suggested_method,
-            "Motivazione": actual_method_reasoning
+            "Motivazione": actual_method_reasoning,
+            "LLM_HaTrovatoEntitaPII": llm_found_pii_entities_flag  # <--- AGGIUNGI LA NUOVA COLONNA QUI
         })
 
     report_df = pd.DataFrame(report_rows)
