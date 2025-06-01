@@ -25,7 +25,7 @@ def calculate_k_anonymity(df: pd.DataFrame, qid_cols: List[str]) -> Tuple[Union[
 
         eq_sizes = df_qid_dropped.groupby(qid_cols, observed=True,
                                           dropna=False).size()  # observed=True è default ma esplicito
-    except KeyError as e:
+    except KeyError:
         # print(f"DEBUG k-anonymity: KeyError durante il groupby: {e}")
         return float('inf'), 0  # Uno dei qid_cols non è valido dopo il dropna? Improbabile.
 
@@ -66,7 +66,7 @@ def calculate_l_diversity(df: pd.DataFrame, qid_cols: List[str], sensitive_col: 
 
         # Calcola il numero di valori unici dell'attributo sensibile per ogni gruppo di QID
         diversities = df_subset.groupby(qid_cols, observed=True, dropna=False)[sensitive_col].nunique()
-    except KeyError as e:
+    except KeyError:
         # print(f"DEBUG l-diversity per {sensitive_col}: KeyError durante il groupby: {e}")
         return 0
 
