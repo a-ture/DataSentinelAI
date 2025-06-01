@@ -3,7 +3,10 @@ import pandas as pd
 import json
 import re
 import hashlib
-
+import asyncio
+# MODIFICA: Assicurati che get_llm_overall_csv_comment sia importato dalla giusta posizione.
+# Se è in generazione_testo.py, modifica l'import qui sotto.
+# Se è in analyisis_cvs.py (come sembra dal tuo import), va bene così.
 from modules.analyisis_cvs import analyze_and_anonymize_csv, get_llm_overall_csv_comment
 from modules.config import LLM_MODELS
 from modules.text_extractor import detect_extension, extract_text
@@ -12,29 +15,30 @@ from modules.generazione_testo import (
     edit_document,
     extract_entities,
     sensitive_informations as get_sensitive_contexts,
+    # Se get_llm_overall_csv_comment è definito qui, rimuovilo dall'import di analyisis_cvs
 )
 from modules.utils import write_file
+# AGGIUNTA: Import per le funzioni di calcolo delle metriche di privacy
+from modules.privacy_metrics import calculate_k_anonymity, calculate_l_diversity
 
-# Importazione aggiunta per le funzionalità CSV
-
-# Tipi di entità da considerare PII (come definito precedentemente)
+# Tipi di entità da considerare PII
 PII_TYPES = [
     "PERSON", "PER", "PERS", "person", "persona", "nome",
     "DATE", "data",
     "LOCATION", "LOC", "location", "luogo", "indirizzo", "address", "full address", "comune",
     "ORGANIZATION", "ORG", "organization", "società", "company",
-    "codice fiscale", "national id",
+    "codice fiscale", "national id", "ID_NUMBER",  # Aggiunto ID_NUMBER se l'LLM lo usa
     "phone number", "numero di telefono",
     "email address", "email",
     "credit card number", "numero carta di credito",
-    "CUI",
+    "CUI",  # Assicurati che l'LLM lo riconosca o aggiungi alias se necessario
     "importo",
-    "postal code"
+    "postal code",
+    "MEDICATION", "DIAGNOSIS"  # Aggiunti tipi medici se rilevanti
 ]
 PII_TYPES_LOWER = [pii.lower() for pii in PII_TYPES]
 
 
-# Funzione per generare il report generale (come definito precedentemente)
 def genera_dati_report_generale(report_llm: dict, df_entita_ner: pd.DataFrame, pii_types_list_lower: list) -> dict:
     dati_consolidati = {
         "entita_totali_combinate": [],
@@ -127,6 +131,7 @@ def genera_dati_report_generale(report_llm: dict, df_entita_ner: pd.DataFrame, p
 
 
 def genera_documento_modificato_consolidato(original_text: str, df_pii_consolidate: pd.DataFrame) -> str:
+    # ... (codice invariato)
     if df_pii_consolidate.empty or "Testo Entità" not in df_pii_consolidate.columns:
         return original_text
     modified_text = original_text
@@ -144,6 +149,7 @@ def genera_documento_modificato_consolidato(original_text: str, df_pii_consolida
 
 
 def genera_csv_modificato_consolidato(original_df: pd.DataFrame, df_pii_consolidate: pd.DataFrame) -> pd.DataFrame:
+    # ... (codice invariato)
     if original_df.empty or df_pii_consolidate.empty or "Testo Entità" not in df_pii_consolidate.columns:
         return original_df
     redacted_df = original_df.copy()
@@ -179,31 +185,30 @@ def genera_csv_modificato_consolidato(original_df: pd.DataFrame, df_pii_consolid
 def main():
     st.set_page_config(page_title="DataSentinelAI", layout="wide")
 
-    if "reports" not in st.session_state:
-        st.session_state["reports"] = {}
-    if "edited_docs" not in st.session_state:
-        st.session_state["edited_docs"] = {}
-    if "ner_entities" not in st.session_state:
-        st.session_state["ner_entities"] = pd.DataFrame()
-    if "general_report_data" not in st.session_state:
-        st.session_state["general_report_data"] = None
-    if "raw_text_input" not in st.session_state:
-        st.session_state["raw_text_input"] = ""
-    if "current_file_ext" not in st.session_state:
-        st.session_state["current_file_ext"] = ".txt"
-    if "last_uploaded_filename" not in st.session_state:
-        st.session_state["last_uploaded_filename"] = None
-    if "general_edited_document" not in st.session_state:
-        st.session_state["general_edited_document"] = None
-    if "original_csv_df" not in st.session_state:
-        st.session_state["original_csv_df"] = None
-    if "column_reports" not in st.session_state:
-        st.session_state["column_reports"] = {}
+    # Inizializzazione session_state (invariata)
+    if "reports" not in st.session_state: st.session_state["reports"] = {}
+    if "edited_docs" not in st.session_state: st.session_state["edited_docs"] = {}
+    if "ner_entities" not in st.session_state: st.session_state["ner_entities"] = pd.DataFrame()
+    if "general_report_data" not in st.session_state: st.session_state["general_report_data"] = None
+    if "raw_text_input" not in st.session_state: st.session_state["raw_text_input"] = ""
+    if "current_file_ext" not in st.session_state: st.session_state["current_file_ext"] = ".txt"
+    if "last_uploaded_filename" not in st.session_state: st.session_state["last_uploaded_filename"] = None
+    if "general_edited_document" not in st.session_state: st.session_state["general_edited_document"] = None
+    if "original_csv_df" not in st.session_state: st.session_state["original_csv_df"] = None
+    if "column_reports" not in st.session_state: st.session_state[
+        "column_reports"] = {}  # Vecchia chiave, potrebbe non servire più se csv_analysis_report_df la sostituisce
+    if "csv_analysis_report_df" not in st.session_state: st.session_state["csv_analysis_report_df"] = pd.DataFrame()
+    if "calculated_risk_metrics" not in st.session_state: st.session_state.calculated_risk_metrics = {
+        "k_anonymity_min": "N/D", "records_singoli": "N/D", "l_diversity": {}}
+    if "identified_qids_for_summary" not in st.session_state: st.session_state.identified_qids_for_summary = []
+    if "identified_sas_for_summary" not in st.session_state: st.session_state.identified_sas_for_summary = []
+    if "overall_csv_comment" not in st.session_state: st.session_state.overall_csv_comment = None
 
     st.title("🛡️ DataSentinelAI")
 
-    # Sezione 1: Input Utente
+    # Sezione 1: Input Utente (invariata)
     with st.container():
+        # ... (codice invariato) ...
         st.subheader("1. Fornisci il Testo o File")
         default_radio_index = 0
         if st.session_state.get("last_uploaded_filename"):
@@ -274,13 +279,20 @@ def main():
             st.session_state["ner_entities"] = pd.DataFrame()
             st.session_state["general_report_data"] = None
             st.session_state["general_edited_document"] = None
+            st.session_state["csv_analysis_report_df"] = pd.DataFrame()  # Resetta anche questo
+            st.session_state.calculated_risk_metrics = {"k_anonymity_min": "N/D", "records_singoli": "N/D",
+                                                        "l_diversity": {}}
+            st.session_state.identified_qids_for_summary = []
+            st.session_state.identified_sas_for_summary = []
+            st.session_state.overall_csv_comment = None
             st.rerun()
 
     raw_text_to_process = st.session_state.get("raw_text_input", "")
     st.markdown("---")
 
-    # Sezione 2: Azioni di Analisi
+    # Sezione 2: Azioni di Analisi (invariata fino alla Sezione 2.b)
     with st.container():
+        # ... (codice invariato per Sezione 2, Azioni LLM testo completo, NER, Modifica Doc, Report Generale Consolidato) ...
         st.subheader("2. Esegui Azioni di Analisi")
         action_cols_1_2 = st.columns(2)
 
@@ -292,7 +304,6 @@ def main():
                                 not st.session_state.get("original_csv_df").empty))
             if st.button("🚀 Analizza PII con LLM (Testo Completo/CSV come JSON)", key="btn_analyze_pii_llm",
                          use_container_width=True, disabled=not can_analyze_llm):
-                # ... (logica esistente per Analisi PII con LLM)
                 is_valid_input_for_llm = False
                 if st.session_state.get("current_file_ext") == ".csv" and st.session_state.get(
                         "original_csv_df") is not None:
@@ -307,7 +318,6 @@ def main():
                         st.error("Nessun modello LLM configurato in config.py")
                     else:
                         reports_data_llm_output = {}
-
                         if st.session_state.get("current_file_ext") == ".csv" and st.session_state.get(
                                 "original_csv_df") is not None:
                             with st.spinner("Generazione report PII (CSV come JSON) in corso..."):
@@ -322,6 +332,7 @@ def main():
                                 overall_progress_bar = st.progress(0, text="Avvio analisi CSV in JSON...")
                                 for i_model, (model_name, model_api_id) in enumerate(active_llm_models.items(),
                                                                                      start=1):
+                                    # ... (logica chunking CSV come JSON invariata)
                                     overall_progress_bar.progress((i_model - 1) / len(active_llm_models),
                                                                   text=f"Modello {model_name} (CSV-JSON): Avvio...")
                                     all_entities_current_model_json = []
@@ -386,7 +397,8 @@ def main():
                                 overall_progress_bar.progress(1.0, text="Analisi PII (CSV come JSON) completata!")
                                 st.success("Analisi PII (CSV come JSON) completata!")
                                 st.toast("Analisi PII (CSV come JSON) completata!", icon="✅")
-                        else:
+                        else:  # Analisi Testo Libero
+                            # ... (logica chunking testo invariata) ...
                             with st.spinner("Generazione report PII (Testo) in corso..."):
                                 CHUNK_SIZE_FOR_GENERIC_TEXT = 10000
                                 num_text_chunks = (len(raw_text_to_process) - 1) // CHUNK_SIZE_FOR_GENERIC_TEXT + 1
@@ -456,10 +468,9 @@ def main():
                 else:
                     st.error("Il testo di input è vuoto o il file CSV caricato è vuoto/invalido.")
 
-            # Bottone Esegui NER Dedicata
             if st.button("✨ Esegui NER Dedicata", key="btn_run_ner", use_container_width=True,
                          disabled=not raw_text_to_process.strip()):
-                # ... (logica esistente per NER Dedicata)
+                # ... (codice invariato)
                 if raw_text_to_process.strip():
                     with st.spinner("Estrazione entità NER dedicata in corso..."):
                         ner_entities_list_loc = extract_entities(raw_text_to_process)
@@ -469,14 +480,13 @@ def main():
                         st.toast("Analisi NER completata!", icon="🔖")
                         st.info("ℹ️ Entità NER estratte. Visualizzale nella tab apposita.")
 
-        with action_cols_1_2[1]:  # Colonna destra per azioni secondarie/derivate
-            # Bottone Modifica Documento
+        with action_cols_1_2[1]:
+            # ... (codice invariato per Modifica Documento e Report Generale Consolidato) ...
             can_edit_doc = (raw_text_to_process.strip() and \
                             st.session_state.get("reports") and \
                             any(st.session_state["reports"].values()))
             if st.button("✏️ Modifica Documento (basato su Report Testo Completo/CSV-JSON)", key="btn_edit_doc",
                          use_container_width=True, disabled=not can_edit_doc):
-                # ... (logica esistente per Modifica Documento)
                 if raw_text_to_process.strip() and st.session_state.get("reports") and any(
                         st.session_state["reports"].values()):
                     if st.session_state.get("current_file_ext") == ".csv":
@@ -504,12 +514,10 @@ def main():
                 else:
                     st.warning("Genera prima i 'Report PII con LLM' per poter modificare il documento.")
 
-            # Bottone Genera/Aggiorna Report Generale
             can_generate_general_report = (st.session_state.get("reports") or \
                                            not st.session_state.get("ner_entities", pd.DataFrame()).empty)
             if st.button("📊 Genera/Aggiorna Report Generale", key="btn_general_report_main", use_container_width=True,
                          disabled=not can_generate_general_report):
-                # ... (logica esistente per Report Generale)
                 if st.session_state.get("reports") or not st.session_state.get("ner_entities", pd.DataFrame()).empty:
                     with st.spinner("Creazione del Report Generale in corso..."):
                         st.session_state["general_report_data"] = genera_dati_report_generale(
@@ -524,21 +532,17 @@ def main():
                     st.warning("Esegui prima un'analisi (Report PII o NER) per avere dati da aggregare.")
 
         st.markdown("---")
-        # Bottone Genera Documento/CSV Modificato Consolidato
         can_generate_consolidated_edited = st.session_state.get("general_report_data") and \
                                            not st.session_state.get("general_report_data", {}).get(
                                                "tabella_pii_consolidate", pd.DataFrame()).empty
-
         button_label_consolidated = "✍️ Genera Documento Modificato Consolidato"
         is_csv_mode_for_consolidated = st.session_state.get("current_file_ext") == ".csv" and \
                                        st.session_state.get("original_csv_df") is not None and \
                                        st.session_state.get("general_report_data")
         if is_csv_mode_for_consolidated:
             button_label_consolidated = "✍️ Genera CSV Modificato Consolidato (basato su Report Generale)"
-
         if st.button(button_label_consolidated, key="btn_generate_general_edited_doc_csv", use_container_width=True,
                      disabled=not can_generate_consolidated_edited):
-            # ... (logica esistente per Documento/CSV Modificato Consolidato)
             general_report_data_consolidated = st.session_state.get("general_report_data")
             if general_report_data_consolidated and not general_report_data_consolidated.get("tabella_pii_consolidate",
                                                                                              pd.DataFrame()).empty:
@@ -551,7 +555,7 @@ def main():
                             original_df_for_redaction_consolidated, df_pii_for_redaction_consolidated)
                         st.session_state["general_edited_document"] = redacted_df_output_consolidated
                         st.success("CSV Modificato Consolidato generato!")
-                        st.toast("CSV Modificato Consolidato pronto.", icon="�")
+                        st.toast("CSV Modificato Consolidato pronto.", icon="")  # Potrebbe essere un'icona diversa
                     else:
                         original_text_for_consolidation_redaction = st.session_state["raw_text_input"]
                         st.session_state["general_edited_document"] = genera_documento_modificato_consolidato(
@@ -564,232 +568,254 @@ def main():
                 st.warning("Genera prima il 'Report Generale Consolidato' con PII identificate.")
     st.markdown("---")
 
-    # In streamlit_app.py
-
     # ─────────────────────────────────────────────────────────
-    # Sezione 2.b: Analisi automatica PII e Anonimizzazione Specifica per CSV
+    # Sezione 2.b: Analisi CSV, Metriche Re-ID e Report Finale
     # ─────────────────────────────────────────────────────────
     if st.session_state.get("current_file_ext") == ".csv" and st.session_state.get("original_csv_df") is not None:
-        st.subheader("2.b Analisi automatica PII e Anonimizzazione per CSV")
+        st.subheader("2.b Analisi CSV Dettagliata, Rischi di Re-identificazione e Report Finale")
 
-        if not LLM_MODELS:  # Verifica se LLM_MODELS è vuoto
-            st.error(
-                "❌ Nessun modello LLM configurato in `modules/config.py`. Impossibile procedere con l'analisi "
-                "automatica delle colonne CSV.")
+        if not LLM_MODELS:
+            st.error("❌ Nessun modello LLM configurato in `modules/config.py`.")
         else:
             model_options = list(LLM_MODELS.keys())
-            if not model_options:  # Doppia verifica, anche se LLM_MODELS non dovrebbe essere vuoto qui
-                st.error("❌ Il dizionario LLM_MODELS è configurato ma non contiene modelli. Impossibile procedere.")
+            if not model_options:
+                st.error("❌ Dizionario LLM_MODELS configurato ma vuoto.")
             else:
                 selected_model_name = st.selectbox(
-                    "🤖 Scegli il modello LLM da usare per l'analisi delle colonne, i consigli sui metodi e il "
-                    "commento generale sul file:",
-                    options=model_options,
-                    index=0,  # Default al primo modello disponibile
-                    key="csv_column_analysis_model_selector",  # Questa chiave di session_state viene usata sotto
-                    help="Il modello selezionato verrà usato per identificare PII nelle colonne, suggerire metodi di "
-                         "anonimizzazione e generare il commento finale."
+                    "🤖 Scegli il modello LLM per l'analisi delle colonne e il report finale:",
+                    options=model_options, index=0, key="csv_model_selector_reid",
+                    help="Modello per analisi colonne, classificazione QID/SA, e generazione report finale."
                 )
                 model_api_id_for_csv = LLM_MODELS[selected_model_name]
-                st.caption(f"Verrà utilizzato il modello: `{selected_model_name}` (API ID: `{model_api_id_for_csv}`)")
+                st.caption(f"Modello selezionato: `{selected_model_name}` (API ID: `{model_api_id_for_csv}`)")
 
-                df = st.session_state["original_csv_df"].copy()
-                text_cols = df.select_dtypes(include=["object", "string"]).columns
+                original_data_df = st.session_state["original_csv_df"]  # DataFrame originale
+                text_cols = original_data_df.select_dtypes(include=["object", "string"]).columns
 
                 if not text_cols.empty:
-                    # df_anonymized_placeholder = df.copy() # Non più strettamente necessario qui se non usato
-                    if "csv_analysis_report_df" not in st.session_state:  # Inizializza se non presente
+                    if st.button(f"📊 Esegui Analisi Completa del CSV con {selected_model_name}",
+                                 key="btn_full_csv_analysis_v2"):
+                        # Resetta stati per una nuova analisi completa
                         st.session_state["csv_analysis_report_df"] = pd.DataFrame()
+                        st.session_state.calculated_risk_metrics = {"k_anonymity_min": "N/D", "records_singoli": "N/D",
+                                                                    "l_diversity": {}}
+                        st.session_state.identified_qids_for_summary = []
+                        st.session_state.identified_sas_for_summary = []
+                        st.session_state.overall_csv_comment = None
 
-                    # Bottone per avviare o ri-eseguire l'analisi delle colonne
-                    if st.button(f"🔎 Analizza Colonne CSV con {selected_model_name}", key="btn_analyze_csv_cols"):
+                        # 1. Analisi colonne (asincrona)
                         with st.spinner(
-                                f"Analizzo colonne testuali del CSV e ottengo suggerimenti usando {selected_model_name}..."):
-                            report_df_column_analysis, df_anonymized_initial_pass = analyze_and_anonymize_csv(
-                                df[text_cols].copy(),
-                                model_api_id=model_api_id_for_csv,
-                                sample_size=50  # Puoi rendere questo configurabile se vuoi
-                            )
-                            st.session_state["csv_analysis_report_df"] = report_df_column_analysis
-                            st.session_state.overall_csv_comment = None  # Resetta il commento generale se si rianalizza
+                                f"Passo 1/3: Analisi delle colonne del CSV con {selected_model_name}... (max 5 parallele)"):
+                            df_text_cols_to_analyze = original_data_df[text_cols].copy()
+                            try:
+                                report_df_cols, _ = asyncio.run(
+                                    analyze_and_anonymize_csv(
+                                        df_text_cols_to_analyze,
+                                        model_api_id=model_api_id_for_csv,
+                                        sample_size_for_preview=5,
+                                        default_method_fallback="mask",
+                                        max_concurrent_requests=5
+                                    )
+                                )
+                                st.session_state["csv_analysis_report_df"] = report_df_cols
+                                st.success("Analisi colonne CSV completata.")
+                            except Exception as e:
+                                st.error(f"Errore durante l'analisi asincrona delle colonne: {e}")
+                                st.stop()  # Interrompi se l'analisi colonne fallisce
 
-                        st.success(f"Analisi colonne CSV completata con {selected_model_name}.")
+                        # 2. Calcolo metriche di re-identificazione (se l'analisi colonne ha prodotto risultati)
+                        if not st.session_state["csv_analysis_report_df"].empty:
+                            with st.spinner("Passo 2/3: Calcolo delle metriche di rischio di re-identificazione..."):
+                                report_df_llm = st.session_state["csv_analysis_report_df"]
+                                qids = []
+                                sas = []
+                                if "CategoriaLLM" in report_df_llm.columns:
+                                    qid_mask = report_df_llm["CategoriaLLM"].str.lower().str.contains(
+                                        r"quasi[\s\-]?identificatore", na=False, regex=True)
+                                    initial_qids = report_df_llm[qid_mask]["Colonna"].tolist()
+                                    sas = report_df_llm[
+                                        report_df_llm["CategoriaLLM"].str.lower().str.contains("attributo sensibile",
+                                                                                               na=False, regex=False)][
+                                        "Colonna"].tolist()
 
+                                    temp_qids_filtered = []
+                                    for q_col in initial_qids:
+                                        if q_col in original_data_df.columns:
+                                            cardinality_ratio = original_data_df[q_col].nunique(dropna=False) / len(
+                                                original_data_df)
+                                            if len(original_data_df) < 100 or cardinality_ratio < 0.90:
+                                                temp_qids_filtered.append(q_col)
+                                    qids = temp_qids_filtered
+                                else:
+                                    st.warning(
+                                        "Colonna 'CategoriaLLM' non trovata nel report. Impossibile identificare QID/SA per metriche.")
+
+                                st.session_state.identified_qids_for_summary = qids
+                                st.session_state.identified_sas_for_summary = sas
+
+                                df_metrics_input = original_data_df
+                                if len(original_data_df) > 100000:
+                                    df_metrics_input = original_data_df.sample(n=100000, random_state=42)
+
+                                if qids:
+                                    try:
+                                        k_min, rec_sing = calculate_k_anonymity(df_metrics_input, qids)
+                                        st.session_state.calculated_risk_metrics["k_anonymity_min"] = int(
+                                            k_min) if k_min != float('inf') else "N/A (>N)"
+                                        st.session_state.calculated_risk_metrics["records_singoli"] = int(rec_sing)
+                                    except Exception:
+                                        pass  # Gestisci errore se necessario
+
+                                    if sas:
+                                        for sa_col in sas:
+                                            if sa_col in df_metrics_input.columns:
+                                                try:
+                                                    l_min = calculate_l_diversity(df_metrics_input, qids, sa_col)
+                                                    st.session_state.calculated_risk_metrics["l_diversity"][sa_col] = {
+                                                        "l_min": int(l_min) if l_min not in [float('inf'), 0] else (
+                                                            "N/A" if l_min == 0 else l_min)}
+                                                except Exception:
+                                                    pass  # Gestisci errore
+                                st.success("Metriche di rischio di re-identificazione calcolate.")
+
+                            # 3. Generazione del Report Finale Completo
+                            with st.spinner("Passo 3/3: Generazione del Report Privacy completo..."):
+                                file_name = st.session_state.get("last_uploaded_filename", "File CSV")
+                                try:
+                                    st.session_state.overall_csv_comment = get_llm_overall_csv_comment(
+                                        st.session_state["csv_analysis_report_df"],
+                                        st.session_state.calculated_risk_metrics,
+                                        st.session_state.identified_qids_for_summary,
+                                        st.session_state.identified_sas_for_summary,
+                                        model_api_id_for_csv,
+                                        file_name=file_name
+                                    )
+                                    st.success("Report Privacy completo generato.")
+                                except NameError:
+                                    st.error("Funzione 'get_llm_overall_csv_comment' non trovata.")
+                                    st.session_state.overall_csv_comment = "Errore: Funzione per il report non trovata."
+                                except Exception as e_rep:
+                                    st.error(f"Errore generazione report: {e_rep}")
+                                    st.session_state.overall_csv_comment = f"Errore: {e_rep}"
+                        else:  # Se csv_analysis_report_df è vuoto dopo il passo 1
+                            st.info(
+                                "L'analisi delle colonne non ha prodotto risultati, impossibile procedere con metriche e report finale.")
+
+                    # --- Visualizzazione dei risultati dell'analisi per colonna ---
                     if not st.session_state.get("csv_analysis_report_df", pd.DataFrame()).empty:
                         st.markdown("---")
-                        # st.write("Debug: Contenuto del report di analisi colonne (`csv_analysis_report_df`):")
-                        # st.dataframe(st.session_state["csv_analysis_report_df"], use_container_width=True)
-                        # st.markdown("---")
+                        st.markdown("### Dettaglio Analisi per Colonna e Suggerimenti di Anonimizzazione")
+                        df_report_to_display = st.session_state["csv_analysis_report_df"]
+                        # Filtra per mostrare solo colonne che richiedono attenzione o hanno PII
+                        mask_display_cols = (df_report_to_display["LLM_HaTrovatoEntitaPII"] == True) | \
+                                            (df_report_to_display["MetodoSuggerito"] != "nessuno")
 
-                        df_report = st.session_state["csv_analysis_report_df"]
+                        cols_to_show_user = df_report_to_display[mask_display_cols]
 
-                        cond_problematica_descrittiva = (df_report["Problematica"] != "") & \
-                                                        (~df_report["Problematica"].str.contains(
-                                                            "non ha rilevato PII specifiche", case=False, na=False))
-                        cond_metodo_richiede_azione = (df_report["MetodoSuggerito"] != "nessuno")
-                        mask_requires_attention = cond_problematica_descrittiva | cond_metodo_richiede_azione
-
-                        problematic_cols_from_report = df_report[mask_requires_attention]["Colonna"].tolist()
-
-
-                        if not problematic_cols_from_report:
+                        if cols_to_show_user.empty and not df_report_to_display.empty:
                             st.success(
-                                "✅ Analisi LLM completata. Nessuna colonna sembra richiedere un intervento di "
-                                "anonimizzazione urgente basato sui suggerimenti ricevuti.")
-                        else:
-                            st.markdown("### Consigli di anonimizzazione per colonna (da LLM)")
-                            method_selection = {}
-                            available_methods = ["hash", "mask", "generalize_date", "truncate", "nessuno"]
+                                "✅ Nessuna colonna sembra richiedere un intervento di anonimizzazione urgente o contenere PII dirette rilevanti secondo l'analisi LLM.")
+                        elif not cols_to_show_user.empty:
+                            method_selection_ui = {}
+                            available_methods_ui = ["hash", "mask", "generalize_date", "truncate", "nessuno"]
+                            for idx, row_data in cols_to_show_user.iterrows():
+                                col_name_ui = row_data["Colonna"]
+                                problem_desc_ui = row_data["Problematica"]
+                                examples_ui = row_data["Esempi"]
+                                suggested_method_ui = row_data["MetodoSuggerito"]
+                                reasoning_ui = row_data["Motivazione"]
 
-                            for idx, row in st.session_state["csv_analysis_report_df"].iterrows():
-                                col_name = row["Colonna"]
-                                if col_name not in problematic_cols_from_report:
-                                    continue
-
-                                suggested_method = row["MetodoSuggerito"]
-                                reasoning = row["Motivazione"]  # Questa è la motivazione per il METODO
-                                problem_desc = row[
-                                    "Problematica"]  # Questa ora include la sensibilità contestuale della COLONNA e
-                                # delle PII
-                                examples = row["Esempi"]
-
-                                st.markdown(f"**Colonna: {col_name}**")
-                                st.caption(f"Esempi dalla colonna: {examples}")
-
-                                if problem_desc:
-                                    # problem_desc ora contiene la valutazione complessiva e i dettagli PII con la loro motivazione
-                                    # st.warning lo mostrerà con un colore appropriato
-                                    # Il formato multi-linea dovrebbe essere rispettato
-                                    if "Errore da" in problem_desc or "Risposta non valida" in problem_desc:
-                                        st.error(f"{problem_desc}")
-                                    elif "non ha rilevato PII specifiche" in problem_desc:
-                                        st.info(f"{problem_desc}")
-                                    else:  # PII rilevate
-                                        st.warning(f"{problem_desc}")  # Visualizza la "Problematica" arricchita
-
+                                st.markdown(f"**Colonna: {col_name_ui}**")
+                                st.caption(f"Esempi: {examples_ui}")
+                                if "Errore" in problem_desc_ui:
+                                    st.error(f"{problem_desc_ui}")
+                                elif "non ha rilevato PII specifiche" in problem_desc_ui:
+                                    st.info(f"{problem_desc_ui}")
+                                else:
+                                    st.warning(f"{problem_desc_ui}")
                                 st.info(
-                                    f"Metodo di anonimizzazione suggerito dall'LLM: **{suggested_method}**\n\n> Motivazione per il metodo: _{reasoning}_")
+                                    f"Metodo Anon. Suggerito LLM: **{suggested_method_ui}**\n\n> Motivazione Metodo: _{reasoning_ui}_")
 
-                                default_method_idx = 0
-                                if suggested_method in available_methods:
-                                    default_method_idx = available_methods.index(suggested_method)
-
-                                method_selection[col_name] = st.selectbox(
-                                    f"Scegli il metodo definitivo per «{col_name}»:",
-                                    available_methods,
-                                    index=default_method_idx,
-                                    key=f"method_select_final_{col_name}"
-                                )
+                                default_idx_ui = available_methods_ui.index(
+                                    suggested_method_ui) if suggested_method_ui in available_methods_ui else 0
+                                method_selection_ui[col_name_ui] = st.selectbox(f"Scegli metodo per «{col_name_ui}»:",
+                                                                                available_methods_ui,
+                                                                                index=default_idx_ui,
+                                                                                key=f"meth_sel_reid_{col_name_ui}")
                                 st.markdown("---")
 
-                            if st.button("🔒 Applica metodi selezionati e visualizza/scarica CSV anonimizzato",
-                                         key="apply_and_download_anonymized_csv_final_v2"):
-                                df_to_anonymize_final = st.session_state["original_csv_df"].copy()
+                            if st.button("🔒 Applica Metodi Selezionati e Scarica CSV Anonimizzato",
+                                         key="btn_apply_anon_reid"):
+                                # ... (Logica per applicare method_selection_ui e scaricare, come prima)
+                                df_to_anonymize_final_reid = st.session_state["original_csv_df"].copy()
                                 with st.spinner("Applico anonimizzazione selezionata..."):
-                                    for col_to_anon, selected_method_for_col in method_selection.items():
-                                        if col_to_anon in df_to_anonymize_final.columns:
+                                    for col_to_anon, selected_method_for_col in method_selection_ui.items():
+                                        if col_to_anon in df_to_anonymize_final_reid.columns:
+                                            # ... (copia la logica di if/elif per hash, mask, generalize_date, truncate)
                                             if selected_method_for_col == "hash":
-                                                df_to_anonymize_final[col_to_anon] = df_to_anonymize_final[
+                                                df_to_anonymize_final_reid[col_to_anon] = df_to_anonymize_final_reid[
                                                     col_to_anon].astype(str).apply(
                                                     lambda x: hashlib.sha256(x.encode()).hexdigest() if pd.notna(
                                                         x) else x)
                                             elif selected_method_for_col == "mask":
-                                                df_to_anonymize_final[col_to_anon] = df_to_anonymize_final[
+                                                df_to_anonymize_final_reid[col_to_anon] = df_to_anonymize_final_reid[
                                                     col_to_anon].astype(str).str.replace(r"[a-zA-Z0-9]", "*",
                                                                                          regex=True)
                                             elif selected_method_for_col == "generalize_date":
                                                 try:
                                                     parsed_dates_final = pd.to_datetime(
-                                                        df_to_anonymize_final[col_to_anon], errors='coerce')
-                                                    df_to_anonymize_final[
+                                                        df_to_anonymize_final_reid[col_to_anon], errors='coerce')
+                                                    df_to_anonymize_final_reid[
                                                         col_to_anon] = parsed_dates_final.dt.to_period("M").astype(
                                                         str).replace('NaT', pd.NA)
                                                 except Exception:
                                                     st.warning(
                                                         f"Impossibile generalizzare le date per la colonna {col_to_anon}. Lasciata invariata.")
-                                                    df_to_anonymize_final[col_to_anon] = df_to_anonymize_final[
-                                                        col_to_anon]  # Ripristina se fallisce
                                             elif selected_method_for_col == "truncate":
-                                                df_to_anonymize_final[col_to_anon] = df_to_anonymize_final[
-                                                                                         col_to_anon].astype(
+                                                df_to_anonymize_final_reid[col_to_anon] = df_to_anonymize_final_reid[
+                                                                                              col_to_anon].astype(
                                                     str).str.slice(0, 10) + "..."
-
-                                st.session_state["anonymized_csv_for_download"] = df_to_anonymize_final.copy()
-                                st.success("Anonimizzazione basata sulla selezione utente completata ✅")
-                                st.markdown("##### Anteprima CSV Anonimizzato (prime 5 righe):")
+                                st.session_state["anonymized_csv_for_download"] = df_to_anonymize_final_reid.copy()
+                                st.success("Anonimizzazione completata ✅")
                                 st.dataframe(st.session_state["anonymized_csv_for_download"].head(),
                                              use_container_width=True)
+                                csv_bytes_dl = st.session_state["anonymized_csv_for_download"].to_csv(
+                                    index=False).encode("utf-8")
+                                dl_file_name = f"anonimizzato_reid_{st.session_state.get('last_uploaded_filename', 'file').replace('.csv', '')}.csv"
+                                st.download_button("📥 Scarica CSV Anonimizzato", csv_bytes_dl, dl_file_name, "text/csv",
+                                                   key="dl_anon_csv_reid_btn")
+                        # else: # Se cols_to_show_user è vuoto ma il report generale non lo è
+                        #    st.caption("Nessuna colonna specifica richiede un intervento manuale di anonimizzazione basato sui suggerimenti LLM.")
 
-                                try:
-                                    csv_bytes_final = st.session_state["anonymized_csv_for_download"].to_csv(
-                                        index=False).encode("utf-8")
-                                    file_name_download = f"anonimizzato_{st.session_state.get('last_uploaded_filename', 'file').replace('.csv', '')}.csv"
-                                    st.download_button(
-                                        label="📥 Scarica CSV anonimizzato",
-                                        data=csv_bytes_final,
-                                        file_name=file_name_download,
-                                        mime="text/csv",
-                                        key="download_anonymized_csv_final_button_v2"
-                                    )
-                                except Exception as e:
-                                    st.error(f"Errore durante la creazione del file CSV per il download: {e}")
-                    elif st.session_state.get("csv_analysis_report_df") is None or st.session_state.get(
-                            "csv_analysis_report_df").empty:
-                        st.caption("Clicca 'Analizza Colonne CSV' per avviare l'analisi e visualizzare i suggerimenti.")
-
-                elif st.session_state.get("current_file_ext") == ".csv":  # text_cols è vuoto
-                    st.info(
-                        "ℹ️ Il file CSV caricato non contiene colonne di tipo testuale (object o string) da analizzare con questo metodo.")
-
-                # --- INIZIO SEZIONE PER COMMENTO GENERALE SUL CSV (AGGIUNTA) ---
-                if st.session_state.get("csv_analysis_report_df") is not None and \
-                        not st.session_state.get("csv_analysis_report_df").empty:
-
-                    st.markdown("---")
-                    st.subheader("✍️ Commento Generale sulla Sensibilità del File CSV")
-
-                    if "overall_csv_comment" not in st.session_state:
-                        st.session_state.overall_csv_comment = None
-
-                    # model_api_id_for_csv è già definito sopra se siamo in questo blocco 'else'
-
-                    if st.button("Genera Commento Generale sul File CSV (con LLM)",
-                                 key="btn_generate_overall_csv_comment_v3"):
-                        with st.spinner("Generazione del commento generale in corso..."):
-                            file_name_for_display = st.session_state.get("last_uploaded_filename", "File CSV Corrente")
-                            # Assicurati che la funzione sia importata, es:
-                            # from modules.generazione_testo import get_llm_overall_csv_comment
-                            # o da modules.analyisis_cvs se l'hai messa lì.
-                            # Per questa risposta, assumo che sia in generazione_testo come suggerito prima.
-                            try:
-                                st.session_state.overall_csv_comment = get_llm_overall_csv_comment(
-                                    st.session_state["csv_analysis_report_df"],
-                                    model_api_id_for_csv,  # Usa lo stesso modello dell'analisi colonne
-                                    file_name=file_name_for_display
-                                )
-                            except ImportError:
-                                st.error(
-                                    "Funzione 'get_llm_overall_csv_comment' non trovata. Assicurati sia definita e importata.")
-                                st.session_state.overall_csv_comment = "Errore: Funzione per il commento non disponibile."
-
+                    # --- Visualizzazione del Report Privacy Completo ---
                     if st.session_state.overall_csv_comment:
-                        st.markdown("#### Valutazione Complessiva del File da LLM:")
-                        st.markdown(st.session_state.overall_csv_comment)
-                        if st.button("Rimuovi commento generale", key="clear_overall_comment_v2"):
+                        st.markdown("---")  # Separatore prima del report finale
+                        st.markdown(st.session_state.overall_csv_comment, unsafe_allow_html=True)
+                        if st.button("Rimuovi Report Privacy Completo", key="clear_overall_report_final_v3"):
                             st.session_state.overall_csv_comment = None
+                            st.session_state.calculated_risk_metrics = {"k_anonymity_min": "N/D",
+                                                                        "records_singoli": "N/D", "l_diversity": {}}
+                            st.session_state.identified_qids_for_summary = []
+                            st.session_state.identified_sas_for_summary = []
                             st.rerun()
-                    else:
+                    elif st.session_state.get("csv_analysis_report_df") is not None and not st.session_state.get(
+                            "csv_analysis_report_df").empty:
                         st.caption(
-                            "Clicca il bottone sopra per generare un commento generale sulla sensibilità del file CSV.")
-                # --- FINE SEZIONE PER COMMENTO GENERALE SUL CSV ---
+                            "Clicca 'Esegui Analisi Completa del CSV' per generare l'analisi delle colonne, le metriche di rischio e il report finale.")
 
-        # Questo st.markdown("---") chiude la sezione 2.b, se è l'ultimo elemento del blocco "if current_file_ext == .csv"
-        # Se hai un st.markdown("---") generale dopo il container "Azioni di Analisi", questo potrebbe essere ridondante
-        # o puoi rimuovere quello più esterno. Per ora lo lascio come era nella tua struttura implicita.
-        st.markdown("---")
+                else:  # text_cols è vuoto
+                    st.info(
+                        "ℹ️ Il file CSV caricato non contiene colonne di tipo testuale (object o string) per l'analisi LLM.")
+            # Fine del blocco 'else' per 'if not model_options:'
+        # Fine del blocco 'else' per 'if not LLM_MODELS:'
+    # Fine del blocco principale 'if st.session_state.get("current_file_ext") == ".csv" ...'
 
-    # Logica per visualizzare i risultati o messaggio di attesa
+    # Questo st.markdown("---") è quello che avevi alla riga 835, che chiude la Sezione 2.b
+    # st.markdown("---") # Potrebbe essere ridondante se il container successivo ha già un separatore
+
+    # Logica per visualizzare i risultati o messaggio di attesa (invariata)
     display_results_flag = False
+    # ... (codice invariato) ...
     if st.session_state.get("current_file_ext") == ".csv" and st.session_state.get("original_csv_df") is not None:
         if not st.session_state.get("original_csv_df").empty:
             display_results_flag = True
@@ -798,10 +824,11 @@ def main():
 
     if not display_results_flag:
         st.info("Inserisci del testo o carica un file valido e scegli un'azione per visualizzare i risultati.")
-        st.stop()  # Interrompe l'esecuzione se non ci sono dati da visualizzare
+        st.stop()
 
-    # Sezione 3: Visualizza Risultati
+    # Sezione 3: Visualizza Risultati (invariata)
     with st.container():
+        # ... (codice invariato) ...
         st.subheader("3. Visualizza Risultati")
         tab_titles = ["🔎 Report PII (LLM - Testo Completo/CSV-JSON)", "🔖 Entità NER Dedicata",
                       "✏️ Documenti Modificati (LLM)",
@@ -809,7 +836,7 @@ def main():
         tab_llm_reports, tab_ner_dedicated, tab_edited_docs, tab_general_report_display = st.tabs(tab_titles)
 
         with tab_llm_reports:
-            # ... (logica esistente per tab_llm_reports)
+            # ... (codice invariato)
             header_text_llm_report = "Report PII da LLM"
             if st.session_state.get("current_file_ext") == ".csv" and st.session_state.get(
                     "original_csv_df") is not None:
@@ -889,7 +916,7 @@ def main():
                 st.info("Esegui 'Analizza PII con LLM' per visualizzare i risultati qui.")
 
         with tab_ner_dedicated:
-            # ... (logica esistente per tab_ner_dedicated)
+            # ... (codice invariato)
             st.header("Entità Rilevate da NER Dedicata (su Testo Completo)")
             if not st.session_state.get("ner_entities", pd.DataFrame()).empty:
                 st.dataframe(st.session_state["ner_entities"], use_container_width=True)
@@ -909,7 +936,7 @@ def main():
                 st.info("Nessuna entità da NER dedicata disponibile. Esegui 'Esegui NER Dedicata'.")
 
         with tab_edited_docs:
-            # ... (logica esistente per tab_edited_docs)
+            # ... (codice invariato)
             st.header("Documenti Modificati (output testuale dagli LLM)")
             if st.session_state.get("edited_docs") and any(st.session_state["edited_docs"].values()):
                 for model_name_disp_edit, edited_text_content_disp in st.session_state["edited_docs"].items():
@@ -928,7 +955,7 @@ def main():
                     "'Modifica Documento'.")
 
         with tab_general_report_display:
-            # ... (logica esistente per tab_general_report_display)
+            # ... (codice invariato)
             st.header("Report Generale Consolidato")
             if st.session_state.get("general_report_data"):
                 report_data_gen = st.session_state["general_report_data"]
