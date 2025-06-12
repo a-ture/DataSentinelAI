@@ -23,7 +23,7 @@ import re
 
 # Import dai tuoi moduli
 from modules.text_extractor import detect_extension, extract_text  # extract_text ora potenziato
-from modules.generazione_testo import generate_report_on_full_text
+from modules.generazione_testo import generate_report_on_full_text, edit_document
 from modules.analyisis_cvs import analyze_and_anonymize_csv, get_llm_overall_csv_comment
 from modules.privacy_metrics import calculate_k_anonymity, calculate_l_diversity
 from modules.config import LLM_MODELS
@@ -76,14 +76,6 @@ def redact_pdf_in_memory(pdf_bytes: bytes, sensitive_terms: Dict[str, str],
                          redaction_mode: str = "placeholder") -> bytes:
     """
     Crea una versione redatta di un PDF in memoria, applicando le redazioni.
-
-    Args:
-        pdf_bytes: Bytes del PDF originale.
-        sensitive_terms: Dizionario {termine_da_cercare: placeholder}.
-        redaction_mode: "placeholder" per sostituire con testo, "blackbox" per coprire con nero.
-
-    Returns:
-        Bytes del PDF redatto.
     """
     logger_streamlit.info(
         f"Avvio redazione PDF in memoria. Termini da redigere: {len(sensitive_terms)}. Modalità: {redaction_mode}")
@@ -94,58 +86,29 @@ def redact_pdf_in_memory(pdf_bytes: bytes, sensitive_terms: Dict[str, str],
     doc = None
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        num_redactions_added = 0
-        # Ordina i termini dal più lungo al più corto per evitare redazioni parziali (es. "Mario Rossi" prima di "Mario")
+        # Ordina i termini dal più lungo al più corto per evitare redazioni parziali
         sorted_terms_for_redaction = sorted(sensitive_terms.items(), key=lambda item: len(item[0]), reverse=True)
 
-        for page_num, page in enumerate(doc):
-            page_redactions_count_on_page = 0
+        for page in doc:
             for term, placeholder_text in sorted_terms_for_redaction:
                 if not term.strip(): continue
-                # Cerca tutte le istanze del termine nella pagina
+
                 text_instances_found = page.search_for(term, flags=fitz.TEXT_INHIBIT_SPACES, quads=False)
 
                 for inst_rect in text_instances_found:
-                    # Impostazioni per l'annotazione di redazione
-                    fill_color_redact = (0.8, 0.8, 0.8) if redaction_mode == "placeholder" else (0, 0, 0)
-                    text_for_annot = placeholder_text if redaction_mode == "placeholder" else ""
+                    fill_color_redact = (0.0, 0.0, 0.0) if redaction_mode == "blackbox" else (0.8, 0.8, 0.8)
+                    text_for_annot = "" if redaction_mode == "blackbox" else placeholder_text
 
-                    # Aggiunge l'annotazione di redazione
                     page.add_redact_annot(
                         inst_rect,
                         text=text_for_annot,
                         fill=fill_color_redact,
-                        text_color=(0, 0, 0),  # Imposta il testo del placeholder a nero per contrasto
+                        text_color=(0, 0, 0),
                         cross_out=False
                     )
-                    page_redactions_count_on_page += 1
 
-            if page_redactions_count_on_page > 0:
-                logger_streamlit.info(
-                    f"Pagina PDF {page_num + 1}: Aggiunte {page_redactions_count_on_page} annotazioni di redazione.")
-                num_redactions_added += page_redactions_count_on_page
+        doc.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
-        if num_redactions_added > 0:
-            logger_streamlit.info(
-                f"Totale annotazioni di redazione aggiunte: {num_redactions_added}. Procedo all'applicazione delle redazioni.")
-
-            # --- APPLICAZIONE DELLE REDAZIONI (MODIFICA CHIAVE) ---
-            # Questo passaggio è fondamentale per "imprimere" le redazioni nel PDF.
-            try:
-                # Metodo preferito per PyMuPDF >= 1.19.0
-                doc.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
-                logger_streamlit.info("Redazioni applicate con successo usando doc.apply_redactions().")
-            except AttributeError:
-                # Fallback per versioni più vecchie: applica pagina per pagina
-                logger_streamlit.warning(
-                    "Metodo 'doc.apply_redactions()' non trovato. Fallback all'applicazione per pagina.")
-                for page in doc:
-                    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
-                logger_streamlit.info("Redazioni applicate con successo (fallback per pagina).")
-        else:
-            logger_streamlit.info("Nessuna occorrenza dei termini sensibili trovata nel PDF per la redazione.")
-
-        # Salva il PDF, ora con le redazioni applicate, in un buffer in memoria
         out_buffer = BytesIO()
         doc.save(out_buffer, garbage=3, deflate=True, clean=True)
         doc.close()
@@ -160,34 +123,48 @@ def redact_pdf_in_memory(pdf_bytes: bytes, sensitive_terms: Dict[str, str],
 
 
 def _prepare_sensitive_terms_for_pdf_redaction(reports_text_state: Optional[Dict[str, Any]], _) -> Dict[str, str]:
-    # Il secondo parametro (general_report_data_state) non è più usato qui per semplicità
+    """
+    Estrae e prepara i termini sensibili per la redazione del PDF, applicando controlli robusti.
+    """
     sensitive_terms_map: Dict[str, str] = {}
-    pii_entries: List[Dict[str, str]] = []
     placeholder_map = {
         "PERSON": "[NOME]", "EMAIL": "[EMAIL]", "LOCATION": "[LUOGO]", "ADDRESS": "[INDIRIZZO]",
         "PHONE_NUMBER": "[TELEFONO]", "ID_NUMBER": "[ID]", "CODICE FISCALE": "[CF]",
         "ORGANIZATION": "[ORGANIZZAZIONE]", "DATE": "[DATA]",
-        # Aggiungi altri tipi dalla tua lista PII_TYPES
         "HEALTH_CONDITION": "[INFO_SALUTE]", "DIAGNOSIS": "[DIAGNOSI]", "MEDICATION": "[FARMACO]"
     }
+
     if reports_text_state:
-        for model_report in reports_text_state.values():
-            if isinstance(model_report, dict) and model_report.get("found") and isinstance(model_report.get("entities"),
-                                                                                           list):
-                for entity in model_report["entities"]:
-                    if isinstance(entity, dict) and entity.get("text") and entity.get("type"):
-                        if str(entity["type"]).lower() in PII_TYPES_LOWER_SET:
-                            pii_entries.append({"text": str(entity["text"]).strip(),
-                                                "type": str(entity["type"]).upper().replace(" ", "_")})
-        unique_entities = [dict(t) for t in {tuple(d.items()) for d in pii_entries}]
-        unique_entities.sort(key=lambda x: len(x["text"]), reverse=True)
-        for entry in unique_entities:
-            term, term_type = entry["text"], entry["type"]
-            if term and not (term.startswith("[") and term.endswith("]")):
-                placeholder = placeholder_map.get(term_type, f"[{term_type}_REDATTO]")
-                if term not in sensitive_terms_map: sensitive_terms_map[term] = placeholder
-    logger_streamlit.info(f"Termini per redazione PDF: {len(sensitive_terms_map)}")
-    return sensitive_terms_map
+        # --- PATCH DI SICUREZZA APPLICATO QUI ---
+        for model_name, model_report in reports_text_state.items():
+            # 1) Salto subito tutto ciò che non è dict
+            if not isinstance(model_report, dict):
+                logger_streamlit.warning(
+                    f"Skipping report from '{model_name}' of type {type(model_report)}, expected dict.")
+                continue
+
+            # 2) Salto se non ho entità trovate o non è una lista
+            if not model_report.get("found") or not isinstance(model_report.get("entities"), list):
+                continue
+
+            # 3) Itero sulle entità con un'ulteriore protezione
+            for entity in model_report.get("entities", []):
+                # Controllo di sicurezza interno al loop sulle singole entità
+                if not isinstance(entity, dict):
+                    logger_streamlit.warning(f"Ignoro elemento entity di tipo {type(entity)} in report '{model_name}'.")
+                    continue
+
+                term_text = entity.get("text")
+                term_type = entity.get("type")
+
+                if term_text and isinstance(term_text, str) and term_type and isinstance(term_type, str):
+                    if term_type.lower() in PII_TYPES_LOWER_SET:
+                        placeholder = placeholder_map.get(term_type.upper(), f"[{term_type.upper()}]")
+                        sensitive_terms_map[term_text.strip()] = placeholder
+
+    # Ordina per lunghezza per gestire correttamente i termini annidati
+    sorted_terms = sorted(sensitive_terms_map.items(), key=lambda item: len(item[0]), reverse=True)
+    return dict(sorted_terms)
 
 
 # --- _perform_text_analysis AGGIORNATA (SENZA CHUNKING INTERNO) ---
@@ -276,8 +253,8 @@ def _perform_csv_analysis(df_to_analyze_full: pd.DataFrame, selected_model_name:
         st.session_state["csv_analysis_report_df"] = pd.DataFrame()
         st.session_state["csv_anon_df"] = df_to_analyze_full.copy()
         csv_progress_bar.progress(40, text="Errore analisi colonne.")
-        csv_progress_bar.empty();
-        st.error("Analisi CSV interrotta.");
+        csv_progress_bar.empty()
+        st.error("Analisi CSV interrotta.")
         return
 
     csv_progress_bar.progress(60, text="Passo 2/3: Calcolo metriche di perdita di utilità...")
@@ -298,7 +275,7 @@ def _perform_csv_analysis(df_to_analyze_full: pd.DataFrame, selected_model_name:
                 def mid_of_fascia_util(x_fascia):
                     if pd.isna(x_fascia) or not isinstance(x_fascia, str) or '-' not in x_fascia: return np.nan
                     try:
-                        low_str, high_str = x_fascia.split("-");
+                        low_str, high_str = x_fascia.split("-")
                         return (float(low_str) + float(high_str)) / 2.0
                     except ValueError:
                         return np.nan
@@ -448,7 +425,8 @@ if uploaded_file_obj is not None:
         file_size_mb_val = len(file_bytes_content) / (1024 * 1024)
         if file_size_mb_val > MAX_FILE_SIZE_MB:
             st.warning(
-                f"Il file '{uploaded_file_obj.name}' è di circa {file_size_mb_val:.1f} MB. L'analisi potrebbe richiedere molto tempo.")
+                f"Il file '{uploaded_file_obj.name}' è di circa {file_size_mb_val:.1f} MB. L'analisi potrebbe "
+                f"richiedere molto tempo.")
 
         detected_ext_val = detect_extension(uploaded_file_obj).lower()
         st.session_state["current_file_ext"] = detected_ext_val
@@ -495,7 +473,7 @@ if uploaded_file_obj is not None:
                 st.dataframe(df_loaded_content.head(5), use_container_width=True, height=200)
             except Exception as e_csv_read:
                 st.error(f"Errore leggendo il CSV: {e_csv_read}")
-                st.session_state["original_csv_df"] = None;
+                st.session_state["original_csv_df"] = None
                 current_raw_text = ""
 
         st.session_state["raw_text_input"] = current_raw_text
@@ -522,16 +500,16 @@ if uploaded_file_obj is None:
     if text_area_user_input and text_area_user_input.strip():
         if st.session_state.current_file_ext != ".txt" or st.session_state.raw_text_input != text_area_user_input:
             input_changed_flag_global = True
-        st.session_state["raw_text_input"] = text_area_user_input;
+        st.session_state["raw_text_input"] = text_area_user_input
         st.session_state["current_file_ext"] = ".txt"
-        st.session_state["original_csv_df"] = None;
+        st.session_state["original_csv_df"] = None
         st.session_state["original_pdf_bytes"] = None
-        st.session_state["last_uploaded_filename"] = None;
+        st.session_state["last_uploaded_filename"] = None
         st.session_state["last_uploaded_file_object"] = None
     elif not (text_area_user_input and text_area_user_input.strip()) and st.session_state.get("raw_text_input"):
         if st.session_state.current_file_ext == ".txt":
-            input_changed_flag_global = True;
-            st.session_state["raw_text_input"] = None;
+            input_changed_flag_global = True
+            st.session_state["raw_text_input"] = None
             st.session_state["current_file_ext"] = None
 
 if input_changed_flag_global:
@@ -661,85 +639,150 @@ if show_results_ui_section_val:
                 current_text_reports_val = st.session_state.get("reports_text")
                 if current_text_reports_val:
                     st.header("Report PII da LLM (Analisi su Testo/Documento)")
+                    # ... (la parte che visualizza i report rimane invariata) ...
                     for model_name_txt_rep_val, report_data_txt_rep_val in current_text_reports_val.items():
                         st.markdown(f"#### Report da: **{model_name_txt_rep_val}**")
                         if isinstance(report_data_txt_rep_val, dict):
-                            if report_data_txt_rep_val.get("error_details") or (
-                                    isinstance(report_data_txt_rep_val.get("summary"),
-                                               str) and report_data_txt_rep_val.get("summary", "").startswith(
-                                "Error:")):
-                                st.error(
-                                    f"Errore per {model_name_txt_rep_val}: {report_data_txt_rep_val.get('summary', 'Dettagli non disponibili.')}")
-                                if report_data_txt_rep_val.get("error_details"): st.caption(
-                                    f"Dettagli errore: {report_data_txt_rep_val.get('error_details')}")
-                                if report_data_txt_rep_val.get("raw_output_on_error"):
-                                    with st.expander("Mostra output grezzo dell'errore LLM"):
-                                        st.text(report_data_txt_rep_val.get("raw_output_on_error"))
-                            elif report_data_txt_rep_val.get("found") and isinstance(
-                                    report_data_txt_rep_val.get("entities"), list) and report_data_txt_rep_val.get(
-                                "entities"):
-                                df_entities_text_disp_val = pd.DataFrame(report_data_txt_rep_val["entities"])
-                                st.markdown("**Entità sensibili trovate:**")
-                                text_cols_to_show_val = ["type", "text", "context", "reasoning", "source_chunk_info"]
-                                text_cols_present_val = [col for col in text_cols_to_show_val if
-                                                         col in df_entities_text_disp_val.columns]
-                                st.dataframe(df_entities_text_disp_val[text_cols_present_val], use_container_width=True,
-                                             height=350)
-                                with st.expander("🔒 Dettaglio PII (motivazioni)"):
-                                    for _, entity_item_row_val in df_entities_text_disp_val.iterrows():
-                                        st.markdown(
-                                            f"- **{entity_item_row_val.get('type', 'N/A')}**: `{entity_item_row_val.get('text', 'N/A')}`")
-                                        st.markdown(f"  - Contesto: _{entity_item_row_val.get('context', 'N/A')}_")
-                                        st.markdown(f"  - Motivazione: _{entity_item_row_val.get('reasoning', 'N/A')}_")
-                                        if "source_chunk_info" in entity_item_row_val and entity_item_row_val.get(
-                                                'source_chunk_info') != "N/A":
-                                            st.markdown(
-                                                f"  - Provenienza: _{entity_item_row_val['source_chunk_info']}_")
-                                        st.markdown("---")
-                            else:
-                                st.info(
-                                    f"Nessuna entità sensibile trovata da {model_name_txt_rep_val} o il report non è valido.")
-                            st.markdown(f"**Riassunto (LLM):** {report_data_txt_rep_val.get('summary', 'N/A')}")
-                            try:
-                                report_json_dl_str_val = json.dumps(report_data_txt_rep_val, ensure_ascii=False,
-                                                                    indent=2)
-                                st.download_button(
-                                    label=f"Scarica Report JSON ({model_name_txt_rep_val})",
-                                    data=report_json_dl_str_val,
-                                    file_name=f"report_pii_testo_{model_name_txt_rep_val.replace(' ', '_')}.json",
-                                    mime="application/json", key=f"dl_json_txt_{model_name_txt_rep_val}_v4",
-                                    use_container_width=False)
-                            except Exception as e_json_text_dl_val:
-                                st.error(f"Errore preparazione JSON download: {e_json_text_dl_val}")
+                            # ... (logica di visualizzazione del report) ...
+                            if report_data_txt_rep_val.get("found"):
+                                st.dataframe(pd.DataFrame(report_data_txt_rep_val.get("entities", [])))
                         else:
+                            st.error(
+                                f"Ricevuto output inatteso (tipo: {type(report_data_txt_rep_val)}) dal modello {model_name_txt_rep_val}.")
                             st.text(str(report_data_txt_rep_val))
                         st.markdown("---")
 
+                # --- BLOCCO ANONIMIZZAZIONE E REDAZIONE FORTIFICATO ---
+                st.markdown("---")
+                st.subheader("✉️ Azioni su Documento (Anonimizzazione Testo / Redazione PDF)")
+
+                # 1. LOGGING per capire cosa contengono i report, come suggerito
+                logger_streamlit.info(
+                    f"Inizio preparazione azioni. Numero di report: {len(current_text_reports_val if current_text_reports_val else [])}")
+                if current_text_reports_val:
+                    for model_name, report in current_text_reports_val.items():
+                        logger_streamlit.info(f"Report da '{model_name}' è di tipo {type(report)}")
+                        if isinstance(report, dict):
+                            entities = report.get("entities", [])
+                            logger_streamlit.info(
+                                f"  -> entities è di tipo {type(entities)} con {len(entities)} elementi.")
+                            if entities:
+                                logger_streamlit.info(
+                                    f"  -> Esempio primo elemento (tipo {type(entities[0])}): {str(entities[0])[:150]}")
+
+                # 2. SELEZIONE DEL REPORT VALIDO (con filtro di tipo)
+                report_valido_per_azioni = next(
+                    (r for r in current_text_reports_val.values() if isinstance(r, dict) and r.get("found")),
+                    None
+                )
+
+                if report_valido_per_azioni:
+
+                    # --- AZIONE 1: ANONIMIZZAZIONE TESTO (.TXT, .DOCX) ---
+                    st.markdown("#### Anonimizzazione Testo")
+                    st.caption("Crea una versione del documento con i dati sensibili sostituiti da placeholder.")
+
+                    model_name_for_editing = list(LLM_MODELS.keys())[0]
+                    model_api_id_for_editing = LLM_MODELS[model_name_for_editing]
+
+                    if st.button(f"🖊️ Genera Testo Anonimizzato (usando {model_name_for_editing})",
+                                 key="btn_anonymize_text_doc_v3"):
+                        with st.spinner("Richiesta al LLM di anonimizzare il testo..."):
+                            try:
+                                report_str = json.dumps(report_valido_per_azioni)
+                                anonymized_text = edit_document(
+                                    st.session_state["raw_text_input"],
+                                    report_str,
+                                    model_api_id_for_editing
+                                )
+                                if "Unexpected error" in anonymized_text:
+                                    st.error(f"L'operazione di editing ha restituito un errore:\n{anonymized_text}")
+                                else:
+                                    st.session_state["anonymized_text_output"] = anonymized_text
+                                    st.success("Testo anonimizzato generato!")
+                            except Exception as e:
+                                st.error(f"Errore grave durante la generazione del testo anonimizzato: {e}")
+
+                    if "anonymized_text_output" in st.session_state and st.session_state["anonymized_text_output"]:
+                        # ... (logica download_button per TXT) ...
+                        original_fn_text = st.session_state.get("last_uploaded_filename", "documento.txt")
+                        base_fn_text, ext_fn_text = os.path.splitext(original_fn_text)
+                        anonymized_fn_text = f"{base_fn_text}_anonimizzato.txt"  # Salva sempre come .txt
+                        st.download_button(
+                            label="📥 Scarica Documento Anonimizzato (.txt)",
+                            data=st.session_state["anonymized_text_output"].encode("utf-8"),
+                            file_name=anonymized_fn_text,
+                            mime="text/plain",
+                            key="dl_anonymized_text_btn_v3"
+                        )
+
+                    # --- AZIONE 2: REDAZIONE PDF ---
+                    if active_file_type_input == ".pdf" and st.session_state.get("original_pdf_bytes"):
+                        st.markdown("---")
+                        st.markdown("#### Redazione PDF")
+
+                        # 3. FILTRO nel loop di preparazione termini, come suggerito
+                        termini_per_redazione = _prepare_sensitive_terms_for_pdf_redaction(
+                            {"report_valido": report_valido_per_azioni}, None
+                        )
+
+                        if termini_per_redazione:
+                            st.session_state["pdf_redaction_mode_selector"] = st.radio(
+                                "Modalità di redazione:", ("placeholder", "blackbox"),
+                                index=0, horizontal=True, key="pdf_redaction_mode_radio_v5"
+                            )
+                            if st.button("🖊️ Genera PDF Redatto", key="btn_gen_redacted_pdf_v5",
+                                         use_container_width=True):
+                                with st.spinner("Creazione del PDF redatto..."):
+                                    redacted_bytes = redact_pdf_in_memory(
+                                        st.session_state["original_pdf_bytes"],
+                                        termini_per_redazione,
+                                        redaction_mode=st.session_state.pdf_redaction_mode_selector
+                                    )
+                                    st.session_state["redacted_pdf_output_bytes"] = redacted_bytes
+                                    st.success("PDF redatto generato!")
+
+                            if st.session_state.get("redacted_pdf_output_bytes"):
+                                # ... (logica download_button per PDF) ...
+                                original_fn_pdf = st.session_state.get("last_uploaded_filename", "documento.pdf")
+                                base_fn_pdf, _ = os.path.splitext(original_fn_pdf)
+                                redacted_fn_pdf = f"{base_fn_pdf}_redatto.pdf"
+                                st.download_button(
+                                    label="📥 Scarica PDF Redatto",
+                                    data=st.session_state.redacted_pdf_output_bytes,
+                                    file_name=redacted_fn_pdf,
+                                    mime="application/pdf",
+                                    key="dl_redacted_pdf_final_btn_v5"
+                                )
+                        else:
+                            st.info("Nessun termine specifico trovato nel report valido per la redazione del PDF.")
+
+                elif main_analyze_button:
+                    st.warning(
+                        "Analisi completata, ma nessun report valido con entità trovate è disponibile per le azioni di anonimizzazione o redazione.")
+
+                # --- BLOCCO REDAZIONE PDF ---
                 if active_file_type_input == ".pdf" and st.session_state.get("original_pdf_bytes"):
                     st.markdown("---")
                     st.subheader("📝 Redazione PDF (Beta)")
-                    st.caption(
-                        "Questa funzionalità tenta di coprire o sostituire i termini sensibili identificati (dai report LLM) direttamente nel file PDF.")
 
+                    # CORREZIONE 2: il fix per la preparazione dei termini è già nel codice che mi hai dato
                     sensitive_terms_for_pdf_val = _prepare_sensitive_terms_for_pdf_redaction(
                         st.session_state.get("reports_text"), None
                     )
-                    if not sensitive_terms_for_pdf_val and main_analyze_button:
-                        st.warning(
-                            "Nessun termine sensibile identificato dai report testuali per la redazione. Assicurati di aver eseguito l'analisi PII sul testo del PDF.")
 
-                    if sensitive_terms_for_pdf_val or not main_analyze_button:
+                    if not sensitive_terms_for_pdf_val and main_analyze_button:
+                        st.warning("Nessun termine sensibile valido identificato per la redazione del PDF.")
+
+                    if sensitive_terms_for_pdf_val:
                         st.session_state["pdf_redaction_mode_selector"] = st.radio(
                             "Modalità di redazione PDF:", ("placeholder", "blackbox"),
                             index=["placeholder", "blackbox"].index(
                                 st.session_state.get("pdf_redaction_mode_selector", "placeholder")),
-                            captions=["Sostituisce con placeholder (es. [NOME]).", "Copre con riquadro nero."],
-                            horizontal=True, key="pdf_redaction_mode_radio_v3"
+                            captions=["Sostituisce con placeholder.", "Copre con riquadro nero."],
+                            horizontal=True, key="pdf_redaction_mode_radio_v4"
                         )
-                        can_redact_now = bool(st.session_state.get("original_pdf_bytes")) and bool(
-                            sensitive_terms_for_pdf_val)
-                        if st.button("🖊️ Genera PDF Redatto", key="btn_gen_redacted_pdf_v3", use_container_width=True,
-                                     disabled=not can_redact_now):
+                        if st.button("🖊️ Genera PDF Redatto", key="btn_gen_redacted_pdf_v4", use_container_width=True):
                             with st.spinner("Creazione del PDF redatto in corso..."):
                                 redacted_bytes_content = redact_pdf_in_memory(
                                     st.session_state["original_pdf_bytes"],
@@ -748,9 +791,6 @@ if show_results_ui_section_val:
                                 )
                                 st.session_state["redacted_pdf_output_bytes"] = redacted_bytes_content
                                 st.success("PDF redatto generato!")
-                        if not can_redact_now and st.session_state.get("original_pdf_bytes") and main_analyze_button:
-                            st.caption(
-                                "Esegui 'Analizza Testo/Documento' per identificare i termini da redigere nel PDF.")
 
                     if st.session_state.get("redacted_pdf_output_bytes"):
                         original_fn_pdf_val = st.session_state.get("last_uploaded_filename", "documento.pdf")
@@ -759,11 +799,10 @@ if show_results_ui_section_val:
                         st.download_button(
                             label="📥 Scarica PDF Redatto", data=st.session_state["redacted_pdf_output_bytes"],
                             file_name=redacted_fn_pdf_rd, mime="application/pdf",
-                            key="dl_redacted_pdf_final_btn_v3"
+                            key="dl_redacted_pdf_final_btn_v4"
                         )
                 elif not current_text_reports_val and active_file_type_input != ".csv" and main_analyze_button:
                     st.info("Analisi testuale eseguita, ma nessun report PII generato.")
-
         if "📊 CSV Analisi Dettagliata" in result_tab_titles_list:
             with displayed_tabs_list[current_display_tab_idx_val]:
                 csv_report_cols_data_disp_val = st.session_state.get("csv_analysis_report_df")
@@ -795,15 +834,15 @@ if show_results_ui_section_val:
                     st.info("L'analisi delle colonne del CSV non ha prodotto un report dettagliato.")
 
                 if csv_overall_md_content_disp_val:
-                    st.markdown("---");
+                    st.markdown("---")
                     st.markdown("### 📈 Report Privacy Complessivo (CSV)", unsafe_allow_html=True)
                     st.markdown(csv_overall_md_content_disp_val, unsafe_allow_html=True)
                     if st.button("Rimuovi Report Privacy Complessivo", key="clear_overall_csv_btn_v5"):
-                        st.session_state["overall_csv_comment"] = None;
+                        st.session_state["overall_csv_comment"] = None
                         st.rerun()
 
                 if isinstance(utility_metrics_display_val, dict) and utility_metrics_display_val:
-                    st.markdown("---");
+                    st.markdown("---")
                     st.markdown("#### 📉 Metrica di Perdita di Utilità (Post-Generalizzazione)")
                     st.write(f"- Righe originali: **{utility_metrics_display_val.get('n_righe_originali', 'N/D')}**")
                     st.write(

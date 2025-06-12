@@ -1,14 +1,14 @@
 # modules/generazione_testo.py
-
 import json
+import re
+import ast  # <-- Aggiungi questo import all'inizio del file!
+from typing import Optional, Dict, Any
+import logging  # Importa il modulo logging
 import socket
 import subprocess
 import time
-import re
 # import ast # Non strettamente necessario se json.loads è l'obiettivo primario
 from functools import lru_cache
-import logging  # Importa il modulo logging
-from typing import Optional, Dict, Any
 
 import openai
 from gliner import GLiNER  # Mantieni se usato da get_ner_pipelines
@@ -70,7 +70,8 @@ def _init_lmstudio(model_api_id: str, port: int = 1234):
 
     model_to_load_cli = model_api_id  # Assumi che model_api_id sia l'identificatore per 'lms load'
     print(
-        f"Attempting to load model via CLI: '{model_to_load_cli}' using 'lms load {model_to_load_cli}'. This call is memoized.")  # Considera logger.info
+        f"Attempting to load model via CLI: '{model_to_load_cli}' using 'lms load {model_to_load_cli}'. This call is "
+        f"memoized.")  # Considera logger.info
     try:
         command_list = ["lms", "load", model_to_load_cli]
 
@@ -139,17 +140,6 @@ def get_ner_pipelines():
     return pipelines_dict
 
 
-# In: modules/generazione_testo.py
-
-import json
-import re
-import ast  # <-- Aggiungi questo import all'inizio del file!
-from typing import Optional, Dict, Any
-import logging
-
-logger = logging.getLogger(__name__)
-
-
 def _error_report(message: str, details: Optional[str] = None, raw_output: Optional[str] = None) -> Dict[str, Any]:
     return {
         "found": False, "entities": [], "summary": message,
@@ -158,7 +148,7 @@ def _error_report(message: str, details: Optional[str] = None, raw_output: Optio
 
 
 def _robust_json_parser(json_string: str, model_api_id_for_log: str, context_for_log: str = "text analysis") -> \
-Optional[Dict[str, Any]]:
+        Optional[Dict[str, Any]]:
     """
     Tenta di estrarre e parsare un blocco JSON, gestendo output incompleti,
     malformati o in formato dizionario Python.
@@ -222,6 +212,22 @@ Optional[Dict[str, Any]]:
         # Prendi la sottostringa fino a quel punto
         truncated_part = s[:last_brace_pos + 1]
 
+        # ─────────────────────────────────────────────────────────────
+        # Nuovo tentativo: estraggo tutti i singoli oggetti "entity"
+        # così da non dipendere da un JSON array completo e valido.
+        entity_dicts = re.findall(r'\{[^}]*"type"\s*:\s*"[^"]+"[^}]*\}', truncated_part)
+        parsed_entities = []
+        for ed in entity_dicts:
+            try:
+                parsed_entities.append(json.loads(ed))
+            except json.JSONDecodeError:
+                continue
+        if parsed_entities:
+            logger.info(
+                f"Parsing fallback ENTITY-EXTRACT riuscito per {model_api_id_for_log}, {len(parsed_entities)} entities.")
+            return {"found": True, "entities": parsed_entities}
+        # ─────────────────────────────────────────────────────────────
+
         # Trova il punto di partenza dell'array 'entities' per estrarre solo gli oggetti interni
         entities_keyword = '"entities": ['
         entities_start_pos = truncated_part.find(entities_keyword)
@@ -259,6 +265,7 @@ Optional[Dict[str, Any]]:
         logger.error(f"Stringa che ha causato il fallimento definitivo: {json_string[:500]}")
         return None  # Fallimento totale
 
+
 def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]:
     _init_lmstudio(model_api_id)
     if not text or not text.strip():
@@ -273,15 +280,18 @@ def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]
 
     system_message_entities = (
         "You are an AI assistant. Your task is to analyze the given text for sensitive information "
-        "and return your findings strictly as a single, valid JSON object. Do not include any explanations or text outside of this JSON. "
+        "and return your findings strictly as a single, valid JSON object. Do not include any explanations or text "
+        "outside of this JSON."
         "If no sensitive information is found, the JSON should indicate this with 'found': false and 'entities': []. "
         "The JSON schema MUST be exactly: "
-        "{'found': boolean, 'entities':[{'type': 'string', 'text': 'string', 'context': 'string', 'reasoning': 'string', 'source_chunk_info': 'string'}]}. "
+        "{'found': boolean, 'entities':[{'type': 'string', 'text': 'string', 'context': 'string', 'reasoning': "
+        "'string', 'source_chunk_info': 'string'}]}."
         "Do NOT add a 'summary' field in this response."
     )
     user_message_entities = (
         "Analyze the following text and return ONLY a single valid JSON object with the exact schema: "
-        "{'found': boolean, 'entities':[{'type': 'string', 'text': 'string', 'context': 'string', 'reasoning': 'string', 'source_chunk_info': 'string'}]}. "
+        "{'found': boolean, 'entities':[{'type': 'string', 'text': 'string', 'context': 'string', 'reasoning': "
+        "'string', 'source_chunk_info': 'string'}]}."
         "For 'source_chunk_info', use 'full document'. Do NOT generate a summary.\n\n"
         f"Text:\n\"\"\"\n{text}\n\"\"\""
     )
@@ -327,7 +337,8 @@ def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]
     # --- SECONDA CHIAMATA: GENERAZIONE RIASSUNTO ---
     logger.info(f"Invio testo a LLM `{model_api_id}` per il riassunto (Passo 2/2).")
 
-    system_message_summary = "You are a helpful AI assistant. Your task is to provide a brief, concise summary of the provided text. Output only the summary text, without any introductory phrases."
+    system_message_summary = ("You are a helpful AI assistant. Your task is to provide a brief, concise summary of the "
+                              "provided text. Output only the summary text, without any introductory phrases.")
     user_message_summary = f"Provide a brief summary of the following text:\n\nText:\n\"\"\"\n{text}\n\"\"\""
 
     summary_text = "Riassunto non generato a causa di un errore."
@@ -360,7 +371,24 @@ def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]
 
 
 def edit_document(text: str, report_str: str, model_api_id: str) -> str:
+    """
+    Modifica un testo per anonimizzare le PII basandosi su un report JSON.
+    Assicura che il report sia una stringa prima di passarlo all'API.
+    """
     _init_lmstudio(model_api_id)
+
+    # --- PATCH APPLICATO QUI ---
+    # Se report_str non è una stringa (es. è un dict), lo serializziamo in JSON.
+    # Questo assicura che il prompt contenga sempre e solo stringhe.
+    if isinstance(report_str, dict):
+        try:
+            report_str = json.dumps(report_str, ensure_ascii=False)
+        except Exception as e_dump:
+            logger.warning(f"edit_document: impossibile serializzare report dict: {e_dump}")
+            # Come fallback, lo converte in una rappresentazione stringa semplice
+            report_str = str(report_str)
+    # --- FINE PATCH ---
+
     system_prompt = (
         "You are an AI assistant. Your task is to remove sensitive information from the provided text, "
         "based on the given JSON report. Replace sensitive items with meaningful placeholders (e.g., [PERSON_NAME], "
@@ -394,7 +422,8 @@ def sensitive_informations(report_str: str, model_api_id: str) -> str:
     system_prompt = (
         "You are an AI assistant. Based on the provided JSON report of sensitive information (which includes a "
         "'reasoning' field for each entity),"
-        "list the contexts for each piece of sensitive information and briefly incorporate or refer to the reasoning provided. "
+        "list the contexts for each piece of sensitive information and briefly incorporate or refer to the reasoning "
+        "provided."
         "Format your answer clearly, for example: "
         "'Sensitive Information: [Value of 'text' field from an entity]\n"
         "Type: [Value of 'type' field from an entity]\n"
