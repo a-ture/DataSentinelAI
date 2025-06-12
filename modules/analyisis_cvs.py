@@ -24,8 +24,6 @@ VALID_PRIVACY_CATEGORIES = {"Identificatore Diretto", "Quasi-Identificatore", "A
                             "Attributo Non Sensibile"}
 
 
-
-
 # --- Funzioni Helper per Generalizzazione, Loss Utilità (definite precedentemente, rimangono) ---
 def evaluate_numeric_info_loss(original_series: pd.Series, generalized_series_str: pd.Series) -> Optional[float]:
     numeric_original = pd.to_numeric(original_series.dropna(), errors="coerce")
@@ -36,7 +34,8 @@ def evaluate_numeric_info_loss(original_series: pd.Series, generalized_series_st
     def midpoint_from_range_str(range_str: str) -> Optional[float]:
         if not isinstance(range_str, str) or '-' not in range_str: return np.nan
         try:
-            low, high = map(float, range_str.split('-')); return (low + high) / 2.0
+            low, high = map(float, range_str.split('-'));
+            return (low + high) / 2.0
         except ValueError:
             return np.nan
 
@@ -228,12 +227,13 @@ Rispondi solo con un oggetto JSON valido (niente testo fuori dal JSON)."""},
         if match_md_json:
             json_str_to_parse = match_md_json.group(1)
         else:
-            first_brace = raw_llm_output.find('{');
+            first_brace = raw_llm_output.find('{')
             last_brace = raw_llm_output.rfind('}')
             if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
                 potential_json = raw_llm_output[first_brace: last_brace + 1]
                 try:
-                    json.loads(potential_json); json_str_to_parse = potential_json
+                    json.loads(potential_json);
+                    json_str_to_parse = potential_json
                 except json.JSONDecodeError:
                     logger.warning(f"Potenziale JSON per '{col_name}' non valido: {potential_json[:200]}...")
 
@@ -273,31 +273,31 @@ Rispondi solo con un oggetto JSON valido (niente testo fuori dal JSON)."""},
                 return col_name, parsed
             except json.JSONDecodeError as json_e:
                 error_detail = f"Errore JSONDecodeError per colonna '{col_name}': {json_e}. Stringa (primi 500char):\n'{json_str_to_parse[:500]}...'"
-                default_error_response["error"] = error_detail;
+                default_error_response["error"] = error_detail
                 default_error_response["method_reasoning"] = error_detail
                 logger.error(f"JSONDecodeError in _inspect_column_async_text ({col_name}): {error_detail}")
                 return col_name, default_error_response
         else:
             error_detail = f"Nessun blocco JSON identificabile per colonna '{col_name}'. Output LLM (primi 500char):\n'{raw_llm_output[:500]}...'"
-            default_error_response["error"] = error_detail;
+            default_error_response["error"] = error_detail
             default_error_response["method_reasoning"] = error_detail
             logger.error(f"Nessun JSON in _inspect_column_async_text ({col_name}): {error_detail}")
             return col_name, default_error_response
     except openai.error.Timeout as to_e:
         error_detail = f"Timeout API OpenAI per colonna '{col_name}': {str(to_e)}"
-        default_error_response["error"] = error_detail;
+        default_error_response["error"] = error_detail
         default_error_response["method_reasoning"] = error_detail
         logger.error(error_detail)
         return col_name, default_error_response
     except openai.error.APIError as api_e:
         error_detail = f"APIError OpenAI per colonna '{col_name}': {type(api_e).__name__} - {str(api_e)}"
-        default_error_response["error"] = error_detail;
+        default_error_response["error"] = error_detail
         default_error_response["method_reasoning"] = error_detail
         logger.error(error_detail)
         return col_name, default_error_response
     except Exception as e:
         error_detail = f"Errore imprevisto in _inspect_column_async_text ({col_name}'): {type(e).__name__} - {str(e)}"
-        default_error_response["error"] = error_detail;
+        default_error_response["error"] = error_detail
         default_error_response["method_reasoning"] = error_detail
         logger.error(error_detail, exc_info=True)
         return col_name, default_error_response
@@ -408,7 +408,7 @@ def _process_numeric_columns_rules(df_numeric: pd.DataFrame, num_bins: int = 5) 
             cat_num_rules = "Quasi-Identificatore"
             motivo_num_rules = f"Alta cardinalità: generalizzato in {num_bins} quantili. Varianza preservata stimata: {info_loss_pct_num if info_loss_pct_num is not None else 'N/D'}%."
         else:
-            metodo_num_rules = "nessuno";
+            metodo_num_rules = "nessuno"
             cat_num_rules = "Attributo Non Sensibile"
             motivo_num_rules = "Bassa cardinalità o pochi valori unici: non richiede generalizzazione numerica."
 
@@ -447,13 +447,13 @@ def _process_date_columns_rules(df_date: pd.DataFrame, granularity_date: str = "
                     "…" if series_date.nunique(dropna=False) > 3 else "")
             except Exception as e_date_gen:
                 logger.error(f"Errore generalizzazione data per colonna '{col_date_rules}': {e_date_gen}")
-                metodo_date_rules = "nessuno";
+                metodo_date_rules = "nessuno"
                 cat_date_rules = "Errore Generalizzazione"
                 motivo_date_rules = f"Errore durante la generalizzazione: {e_date_gen}"
                 esempi_date_rules = "; ".join(series_date.dropna().astype(str).unique()[:3]) + (
                     "…" if series_date.nunique(dropna=False) > 3 else "")
         else:
-            metodo_date_rules = "nessuno";
+            metodo_date_rules = "nessuno"
             cat_date_rules = "Attributo Non Sensibile (Tipo Inatteso)"
             motivo_date_rules = "Colonna non riconosciuta come tipo datetime valido per generalizzazione automatica."
             esempi_date_rules = "; ".join(series_date.dropna().astype(str).unique()[:3]) + (
