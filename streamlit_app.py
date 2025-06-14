@@ -77,21 +77,16 @@ def redact_pdf_in_memory(pdf_bytes: bytes, sensitive_terms: Dict[str, str],
     """
     Crea una versione redatta di un PDF in memoria, applicando le redazioni.
     """
-    logger_streamlit.info(
-        f"Avvio redazione PDF in memoria. Termini da redigere: {len(sensitive_terms)}. Modalità: {redaction_mode}")
-    if not pdf_bytes or not sensitive_terms:
-        logger_streamlit.warning("PDF bytes o termini sensibili mancanti per la redazione.")
-        return pdf_bytes
 
     doc = None
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        # Ordina i termini dal più lungo al più corto per evitare redazioni parziali
         sorted_terms_for_redaction = sorted(sensitive_terms.items(), key=lambda item: len(item[0]), reverse=True)
 
         for page in doc:
             for term, placeholder_text in sorted_terms_for_redaction:
-                if not term.strip(): continue
+                if not term.strip():
+                    continue
 
                 text_instances_found = page.search_for(term, flags=fitz.TEXT_INHIBIT_SPACES, quads=False)
 
@@ -107,7 +102,12 @@ def redact_pdf_in_memory(pdf_bytes: bytes, sensitive_terms: Dict[str, str],
                         cross_out=False
                     )
 
-        doc.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+        # ✅ Questa parte è la correzione chiave
+        for page in doc:
+            try:
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+            except Exception as e:
+                logger_streamlit.warning(f"Errore durante la redazione della pagina: {e}")
 
         out_buffer = BytesIO()
         doc.save(out_buffer, garbage=3, deflate=True, clean=True)
@@ -117,9 +117,11 @@ def redact_pdf_in_memory(pdf_bytes: bytes, sensitive_terms: Dict[str, str],
 
     except Exception as e:
         logger_streamlit.error(f"Errore generico durante la redazione del PDF: {e}", exc_info=True)
-        if doc: doc.close()
+        if doc:
+            doc.close()
         st.error(f"Errore durante la redazione del PDF: {e}. Verrà offerto il download del file originale.")
         return pdf_bytes
+
 
 
 def _prepare_sensitive_terms_for_pdf_redaction(reports_text_state: Optional[Dict[str, Any]], _) -> Dict[str, str]:
@@ -672,7 +674,8 @@ if show_results_ui_section_val:
 
                 # 2. SELEZIONE DEL REPORT VALIDO (con filtro di tipo)
                 report_valido_per_azioni = next(
-                    (r for r in current_text_reports_val.values() if isinstance(r, dict) and r.get("found")),
+                    (r for r in (current_text_reports_val or {}).values() if isinstance(r, dict) and r.get("found")),
+
                     None
                 )
 
