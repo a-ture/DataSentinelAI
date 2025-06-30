@@ -2,12 +2,12 @@
 import json
 import re
 import ast  # <-- Aggiungi questo import all'inizio del file!
+from collections import Counter
 from typing import Optional, Dict, Any
 import logging  # Importa il modulo logging
 import socket
 import subprocess
 import time
-# import ast # Non strettamente necessario se json.loads è l'obiettivo primario
 from functools import lru_cache
 
 import openai
@@ -288,6 +288,7 @@ def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]
         "'string', 'source_chunk_info': 'string'}]}."
         "Do NOT add a 'summary' field in this response."
     )
+
     user_message_entities = (
         "Analyze the following text and return ONLY a single valid JSON object with the exact schema: "
         "{'found': boolean, 'entities':[{'type': 'string', 'text': 'string', 'context': 'string', 'reasoning': "
@@ -304,8 +305,8 @@ def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]
                 {"role": "user", "content": user_message_entities}
             ],
             temperature=0.0,
-            max_tokens=8192,  # Parametro per dare spazio sufficiente alla risposta
-            request_timeout=300  # Timeout aumentato a 5 minuti per gestire modelli lenti
+            max_tokens=8192,
+            request_timeout=300
         )
 
         if response_entities.choices and response_entities.choices[0].message and response_entities.choices[
@@ -370,51 +371,102 @@ def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]
     return final_report
 
 
-def edit_document(text: str, report_str: str, model_api_id: str) -> str:
+from typing import Any, Union
+import json
+import openai
+import logging
+
+logger = logging.getLogger(__name__)
+
+from typing import Union
+import json
+import openai
+import logging
+
+logger = logging.getLogger(__name__)
+
+from typing import Union
+import json
+import openai
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def edit_document(text: str,
+                  report: Union[str, dict],
+                  model_api_id: str) -> str:
     """
     Modifica un testo per anonimizzare le PII basandosi su un report JSON.
-    Assicura che il report sia una stringa prima di passarlo all'API.
+    Accetta il report sia come dict (che serializza internamente) sia già come JSON-string.
+    Fa fino a 2 retry in caso di AttributeError interno al client OpenAI,
+    e se entrambi falliscono utilizza un fallback regex-only basato sul report.
     """
     _init_lmstudio(model_api_id)
 
-    # --- PATCH APPLICATO QUI ---
-    # Se report_str non è una stringa (es. è un dict), lo serializziamo in JSON.
-    # Questo assicura che il prompt contenga sempre e solo stringhe.
-    if isinstance(report_str, dict):
+    # Serializzo il report se arriva come dict
+    if isinstance(report, dict):
         try:
-            report_str = json.dumps(report_str, ensure_ascii=False)
+            report_str = json.dumps(report, ensure_ascii=False)
         except Exception as e_dump:
             logger.warning(f"edit_document: impossibile serializzare report dict: {e_dump}")
-            # Come fallback, lo converte in una rappresentazione stringa semplice
-            report_str = str(report_str)
-    # --- FINE PATCH ---
+            report_str = str(report)
+    else:
+        report_str = report
 
     system_prompt = (
         "You are an AI assistant. Your task is to remove sensitive information from the provided text, "
-        "based on the given JSON report. Replace sensitive items with meaningful placeholders (e.g., [PERSON_NAME], "
-        "[ADDRESS])."
-        "Do not summarize or correct grammar. Only output the modified text. "
+        "based on the given JSON report. Replace sensitive items with meaningful placeholders "
+        "(e.g., [PERSON_NAME], [ADDRESS]). Do not summarize or correct grammar. "
         f"The JSON report detailing sensitive information is: {report_str}"
     )
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",
-         "content": f"Modify the following document based on the report:\n\nText:\n\"\"\"\n{text}\n\"\"\""},
+         "content": f"Modify the following document based on the report:\n\nText:\n\"\"\"\n{text}\n\"\"\""}
     ]
+
+    # Retry loop per AttributeError interno
+    for attempt in range(2):
+        try:
+            resp = openai.ChatCompletion.create(
+                model=model_api_id,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=len(text.split()) + 500
+            )
+            return resp.choices[0].message.content.strip()
+
+        except AttributeError as e_attr:
+            logger.warning(f"edit_document: AttributeError ChatCompletion (tentativo {attempt + 1}/2): {e_attr}")
+            if attempt == 1:
+                logger.error("edit_document: retry falliti, passo al fallback locale.")
+        except openai.error.APIError as e_api:
+            logger.error(f"OpenAI APIError during editing (model: {model_api_id}): {e_api}")
+            return f"Error during document editing (API Error): {e_api}\nOriginal text was:\n{text}"
+        except Exception as e:
+            logger.error(
+                f"Unexpected error during document editing (model: {model_api_id}): {e}",
+                exc_info=True
+            )
+            return f"Unexpected error during document editing: {e}\nOriginal text was:\n{text}"
+
+    # --- Fallback locale: sostituzione diretta delle entità dal report ---
     try:
-        response = openai.ChatCompletion.create(
-            model=model_api_id, messages=messages, temperature=0.0,
-            max_tokens=len(text.split()) + 500
-        )
-        edited_text = response.choices[0].message.content.strip()
-        return edited_text
-    except openai.error.APIError as e:
-        logger.error(f"OpenAI APIError during editing (model: {model_api_id}): {e}")
-        return f"Error during document editing (API Error): {e}\nOriginal text was:\n{text}"
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during document editing (model: {model_api_id}): {e}",
-                     exc_info=True)
-        return f"Unexpected error during document editing: {e}\nOriginal text was:\n{text}"
+        report_dict = report if isinstance(report, dict) else json.loads(report)
+    except Exception:
+        return f"Unable to parse report JSON for fallback.\nOriginal text was:\n{text}"
+
+    fallback = text
+    entities = report_dict.get("entities", [])
+    for ent in entities:
+        if isinstance(ent, dict) and ent.get("text"):
+            term = ent["text"]
+            typ = ent.get("type", "").upper() or "REDACTED"
+            placeholder = f"[{typ}]"
+            fallback = fallback.replace(term, placeholder)
+
+    return fallback
 
 
 def sensitive_informations(report_str: str, model_api_id: str) -> str:

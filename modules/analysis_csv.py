@@ -1,6 +1,4 @@
-# modules/analyisis_cvs.py
-
-import asyncio
+\       import asyncio
 import hashlib
 import json
 import re
@@ -11,17 +9,45 @@ import pandas as pd
 import numpy as np
 import logging
 
-from modules.generazione_testo import _init_lmstudio
-
-# from scipy.stats import variation # Non usata direttamente qui se evaluate_numeric_info_loss è altrove o non usata
+# Assumendo che queste funzioni siano disponibili e correttamente funzionanti
+from modules.generazione_testo import _init_lmstudio, extract_entities
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-LLM_TEXT_ANON_METHODS = ["hash", "mask", "truncate", "pseudonymization", "nessuno"]
+# AGGIUNTA la nuova tecnica 'redact_pii'
+LLM_TEXT_ANON_METHODS = ["hash", "mask", "truncate", "pseudonymization", "redact_pii", "nessuno"]
 VALID_PRIVACY_CATEGORIES = {"Identificatore Diretto", "Quasi-Identificatore", "Attributo Sensibile",
                             "Attributo Non Sensibile"}
+
+
+def _redact_text_with_ner(text: str) -> str:
+    """
+    Applica NER a una stringa di testo e sostituisce le entità trovate con placeholder.
+    Sfrutta la funzione extract_entities già esistente.
+    """
+    if not text or not isinstance(text, str):
+        return text
+
+    # Utilizza la funzione esistente per estrarre le entità PII
+    entities = extract_entities(text)
+    if not entities:
+        return text
+
+    redacted_text = text
+    # Ordina le entità per lunghezza decrescente per evitare sostituzioni parziali
+    # E.g., sostituire "Mario Rossi" prima di "Mario"
+    sorted_entities = sorted(entities, key=lambda x: len(x.get("text", "")), reverse=True)
+
+    for ent in sorted_entities:
+        ent_text = ent.get("text")
+        ent_type = ent.get("type", "PII").upper()
+        if ent_text:
+            placeholder = f"[{ent_type}]"
+            redacted_text = redacted_text.replace(ent_text, placeholder)
+
+    return redacted_text
 
 
 # --- Funzioni Helper per Generalizzazione, Loss Utilità (definite precedentemente, rimangono) ---
@@ -142,18 +168,17 @@ def _infer_parse_dates(df: pd.DataFrame, threshold: float = 0.7) -> Tuple[pd.Dat
 # --- Funzione _inspect_column_async_text AGGIORNATA ---
 async def _inspect_column_async_text(
         col_name: str,
-        # series_for_fallback_checks non è più necessaria perché i fallback sono rimossi
-        sample_preview_for_llm: str,  # Stringa di esempi per il prompt LLM
+        sample_preview_for_llm: str,
         model_api_id: str
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Analizza colonna testuale con LLM. LLM decide sensibilità e metodo.
-    Non ci sono più fallback rule-based per email, gender, city qui.
     """
-    # RIMOSSI tutti i fallback “rule‐based” da questa funzione.
     logger.info(f"Analisi LLM per colonna testuale: '{col_name}'...")
 
     valid_text_methods_for_prompt = ", ".join([f'"{m}"' for m in LLM_TEXT_ANON_METHODS])
+
+    # --- PROMPT CORRETTO E AGGIORNATO ---
     prompt_unificato = f"""
 Analizza la colonna CSV testuale chiamata "{col_name}", i cui valori di esempio sono:
 "{sample_preview_for_llm}".
@@ -186,6 +211,7 @@ Analizza la colonna CSV testuale chiamata "{col_name}", i cui valori di esempio 
    - "mask": preserva parte dell'informazione (es. lunghezza, presenza di caratteri) ma è meno robusto.
    - "truncate": conserva i primi N caratteri (utile se i prefissi sono informativi).
    - "pseudonymization": sostituisce con ID unici mantenendo la distinguibilità dei valori originali (utile se serve mantenere unicità ma non il valore originale).
+   - "redact_pii": ideale per testo libero. Trova e sostituisce solo le entità PII (nomi, luoghi, etc.) con un placeholder (es. [PERSONA]), preservando il resto del testo per l'analisi contestuale dei modelli NLP.
    - "nessuno": se la colonna non necessita di anonimizzazione per ML (es. label, descrizioni generiche non sensibili).
 
 Rispondi **ESCLUSIVAMENTE** in formato JSON, con questa struttura (niente testo extra):
@@ -319,7 +345,6 @@ async def _analyze_text_columns_llm(
         unique_vals_txt = df_text_cols_to_analyze[col_name_txt].dropna().astype(str).unique().tolist()
         sample_preview_txt_str = "; ".join(unique_vals_txt[:sample_size]) + (
             "…" if len(unique_vals_txt) > sample_size else "")
-        # Non passiamo più series_for_fallback_checks perché i fallback sono stati rimossi da _inspect_column_async_text
         tasks_text_to_run.append(
             _inspect_column_async_text(col_name_txt, sample_preview_txt_str, model_api_id_for_text))
 
@@ -347,8 +372,9 @@ async def _analyze_text_columns_llm(
         if has_error_txt:
             actual_problem_description_txt = f"**Errore Analisi Colonna '{col_name_res_txt}':** {llm_data_res_txt['error']}"
         else:
-            column_assessment_llm_txt = llm_data_res_txt.get("column_sensitivity_assessment", "Nessuna valutazione.")
-            actual_problem_description_txt = f"**Valutazione Sensibilità Colonna '{col_name_res_txt}' (LLM):** {column_assessment_llm_txt}"  # Modificato
+            column_assessment_llm_txt_for_problem = llm_data_res_txt.get("column_sensitivity_assessment",
+                                                                         "Nessuna valutazione.")
+            actual_problem_description_txt = f"**Valutazione Sensibilità Colonna '{col_name_res_txt}' (LLM):** {column_assessment_llm_txt_for_problem}"
             if pii_entities_llm_txt:
                 detailed_entity_descriptions_txt = [
                     f"'{ent.get('text', 'N/A')}' (tipo: {ent.get('type', 'N/A')}). Motivo: *{ent.get('reasoning', 'N/D')}*"
@@ -359,7 +385,14 @@ async def _analyze_text_columns_llm(
                 actual_problem_description_txt += "\n\nL'LLM considera la colonna sensibile."
 
         final_applied_method_txt = llm_data_res_txt.get("suggested_anonymization_method", "nessuno")
-        actual_method_reasoning_llm_txt = llm_data_res_txt.get("method_reasoning", "Nessuna motivazione.")
+
+        column_assessment_llm_txt = llm_data_res_txt.get("column_sensitivity_assessment",
+                                                         "Nessuna valutazione sulla categoria fornita.")
+        actual_method_reasoning_llm_txt = llm_data_res_txt.get("method_reasoning",
+                                                               "Nessuna motivazione sul metodo fornita.")
+        final_motivation_txt = (f"Valutazione Categoria: {column_assessment_llm_txt}\n\n"
+                                f"Motivazione Metodo: {actual_method_reasoning_llm_txt}")
+
         llm_column_category_val_txt = llm_data_res_txt.get("column_privacy_category", "Non Classificato")
 
         current_col_data_for_anon_txt = df_out_text_anonymized[col_name_res_txt].copy()
@@ -376,13 +409,19 @@ async def _analyze_text_columns_llm(
         elif final_applied_method_txt == "truncate":
             df_out_text_anonymized[col_name_res_txt] = current_col_data_for_anon_txt.astype(str).str.slice(0,
                                                                                                            10) + "..."
+        # AGGIUNTA la logica per il nuovo metodo 'redact_pii'
+        elif final_applied_method_txt == "redact_pii":
+            df_out_text_anonymized[col_name_res_txt] = current_col_data_for_anon_txt.astype(str).apply(
+                _redact_text_with_ner)
 
         report_rows_text.append({
             "Colonna": col_name_res_txt,
             "Esempi": "; ".join(
                 df_text_cols_to_analyze[col_name_res_txt].dropna().astype(str).unique()[:sample_size].tolist()),
-            "Problematica": actual_problem_description_txt, "MetodoSuggerito": final_applied_method_txt,
-            "Motivazione": actual_method_reasoning_llm_txt, "LLM_HaTrovatoEntitaPII": llm_found_overall_pii_flag_txt,
+            "Problematica": actual_problem_description_txt,
+            "MetodoSuggerito": final_applied_method_txt,
+            "Motivazione": final_motivation_txt,
+            "LLM_HaTrovatoEntitaPII": llm_found_overall_pii_flag_txt,
             "CategoriaLLM": llm_column_category_val_txt,
             "VarianzaPreservata(%)": "N/A (Testuale)"
         })
@@ -433,16 +472,22 @@ def _process_date_columns_rules(df_date: pd.DataFrame, granularity_date: str = "
     for col_date_rules in df_date.columns:
         series_date = df_date[col_date_rules]
         metodo_date_rules, motivo_date_rules, cat_date_rules = "nessuno", "", "Quasi-Identificatore"
+        problem_desc_date = ""
 
         if pd.api.types.is_datetime64_any_dtype(series_date):
             try:
                 gen_date_series_val = generalize_date_series(series_date, granularity=granularity_date)
                 df_out_date_rules[col_date_rules] = gen_date_series_val
                 metodo_date_rules = f"generalize_date ({granularity_date})"
-                motivo_date_rules = {"Y": "Generalizzazione a livello Anno.",
-                                     "Q": "Generalizzazione a livello Trimestre.",
-                                     "M": "Generalizzazione a livello Anno-Mese."}.get(granularity_date,
-                                                                                       "Generalizzazione data.")
+
+                granularity_desc_map = {"Y": "Anno", "Q": "Trimestre", "M": "Anno-Mese"}
+                granularity_desc = granularity_desc_map.get(granularity_date, "sconosciuto")
+
+                motivo_date_rules = (
+                    f"Categoria: Le colonne data sono considerate Quasi-Identificatori poiché possono contribuire a re-identificare un individuo se combinate con altri dati.\n\n"
+                    f"Metodo: È stata applicata una generalizzazione a livello di '{granularity_desc}' per mitigarne il rischio.")
+                problem_desc_date = f"La colonna è stata identificata come Quasi-Identificatore e generalizzata a livello di '{granularity_desc}'."
+
                 esempi_date_rules = "; ".join(series_date.dt.strftime("%Y-%m-%d").dropna().unique()[:3]) + (
                     "…" if series_date.nunique(dropna=False) > 3 else "")
             except Exception as e_date_gen:
@@ -450,20 +495,21 @@ def _process_date_columns_rules(df_date: pd.DataFrame, granularity_date: str = "
                 metodo_date_rules = "nessuno"
                 cat_date_rules = "Errore Generalizzazione"
                 motivo_date_rules = f"Errore durante la generalizzazione: {e_date_gen}"
+                problem_desc_date = f"Errore durante la generalizzazione della data: {e_date_gen}"
                 esempi_date_rules = "; ".join(series_date.dropna().astype(str).unique()[:3]) + (
                     "…" if series_date.nunique(dropna=False) > 3 else "")
         else:
             metodo_date_rules = "nessuno"
             cat_date_rules = "Attributo Non Sensibile (Tipo Inatteso)"
             motivo_date_rules = "Colonna non riconosciuta come tipo datetime valido per generalizzazione automatica."
+            problem_desc_date = "Tipo di dato non riconosciuto come data valida."
             esempi_date_rules = "; ".join(series_date.dropna().astype(str).unique()[:3]) + (
                 "…" if series_date.nunique(dropna=False) > 3 else "")
 
         report_date_list_rules.append({
             "Colonna": col_date_rules, "Esempi": esempi_date_rules,
             "CategoriaLLM": cat_date_rules, "LLM_HaTrovatoEntitaPII": False,
-            "Problematica": f"Valutazione colonna '{col_date_rules}': {motivo_date_rules}",
-            # Modificato per più chiarezza
+            "Problematica": problem_desc_date,
             "MetodoSuggerito": metodo_date_rules, "Motivazione": motivo_date_rules,
             "VarianzaPreservata(%)": "N/A (Data)"
         })
@@ -482,7 +528,9 @@ async def analyze_and_anonymize_csv(
     Analizza e anonimizza le colonne di un DataFrame CSV.
     Le colonne testuali sono inviate all'LLM, numeriche e datetime sono generalizzate con regole.
     """
-    _init_lmstudio(model_api_id if model_api_id else "local_model_generic_placeholder")
+    if model_api_id:
+        _init_lmstudio(model_api_id)
+
     logger.info("Avvio analyze_and_anonymize_csv...")
 
     logger.info("Fase 1: Inferenza e parsing delle date iniziali...")
@@ -540,26 +588,24 @@ async def analyze_and_anonymize_csv(
         report_df_final_concat_res = report_df_final_concat_res.drop_duplicates(subset=["Colonna"], keep="first")
 
     df_out_full_final_res = df_full_input.copy()
-    # Applica le modifiche dai DataFrame specifici al DataFrame completo di output
-    # Colonne testuali anonimizzate
+
     if not df_out_text_res.empty:
         for col_to_update in df_out_text_res.columns:
             if col_to_update in df_out_full_final_res.columns:
                 df_out_full_final_res[col_to_update] = df_out_text_res[col_to_update]
-    # Colonne numeriche generalizzate
+
     if not df_out_num_res.empty:
         for col_to_update in df_out_num_res.columns:
             if col_to_update in df_out_full_final_res.columns:
                 df_out_full_final_res[col_to_update] = df_out_num_res[col_to_update]
-    # Colonne datetime generalizzate
+
     if not df_out_date_res.empty:
         for col_to_update in df_out_date_res.columns:
             if col_to_update in df_out_full_final_res.columns:
                 df_out_full_final_res[col_to_update] = df_out_date_res[col_to_update]
 
     logger.info("Fase 4: Sanificazione finale dei DataFrame di output...")
-    # Sanificazione: converti tutte le colonne object a stringa e riempi NA con stringa vuota per report.
-    # Per df_out, riempi NA con np.nan per coerenza tipi se possibile, poi converti object a stringa.
+
     if not report_df_final_concat_res.empty:
         for col_obj_rep in report_df_final_concat_res.select_dtypes(include=['object']).columns:
             try:
@@ -570,9 +616,6 @@ async def analyze_and_anonymize_csv(
     if df_out_full_final_res is not None:
         for col_obj_out in df_out_full_final_res.select_dtypes(include=['object']).columns:
             try:
-                # Non convertire a stringa se è una colonna numerica/data generalizzata che è object per le fasce ma i cui valori sono ok
-                # Se una colonna è object e contiene misto di stringhe e pd.NA/np.nan, fillna("") e astype(str) è ok.
-                # Se contiene oggetti complessi, astype(str) è una buona sanificazione.
                 if not pd.api.types.is_numeric_dtype(df_out_full_final_res[col_obj_out]) and \
                         not pd.api.types.is_datetime64_any_dtype(df_out_full_final_res[col_obj_out]):
                     df_out_full_final_res[col_obj_out] = df_out_full_final_res[col_obj_out].fillna("").astype(str)
@@ -583,7 +626,6 @@ async def analyze_and_anonymize_csv(
     return report_df_final_concat_res, df_out_full_final_res
 
 
-# Copia qui la funzione get_llm_overall_csv_comment aggiornata
 def get_llm_overall_csv_comment(
         column_analysis_report: pd.DataFrame,
         risk_metrics_calculated: dict,
@@ -615,14 +657,12 @@ def get_llm_overall_csv_comment(
     pii_cols_list_str_rep = ", ".join(cols_with_pii_df_overall_rep["Colonna"].unique()[:5])
     if len(cols_with_pii_df_overall_rep["Colonna"].unique()) > 5: pii_cols_list_str_rep += "..."
     ldiv_entries_rep = risk_metrics_calculated.get("l_diversity", {})
-    # Modificato per stringa più concisa per l-diversity
     ldiv_str_rep = ", ".join([f"{col_ldiv} (l={metrics_ldiv.get('l_min', 'N/D')})" for col_ldiv, metrics_ldiv in
                               ldiv_entries_rep.items()]) if ldiv_entries_rep else 'Nessuna calcolata o SA non specificati'
 
     loss_info_summary_str = "Non calcolata o non applicabile per colonne numeriche di esempio."
     if loss_of_utility_metrics:
         temp_loss_strs = []
-        # Itera solo sulle chiavi che sono presumibilmente nomi di colonna (non 'n_righe_...')
         for col_util, metrics_util in loss_of_utility_metrics.items():
             if isinstance(metrics_util, dict) and "percentuale_preserved_var (%)" in metrics_util:
                 perc_pres_util = metrics_util["percentuale_preserved_var (%)"]
@@ -644,23 +684,29 @@ Metriche Rischio Re-identificazione (soglie indicative: k>=5, l>=2, record singo
 Stima Perdita di Utilità (Varianza Preservata dopo generalizzazione, per colonne numeriche di esempio):
 - {loss_info_summary_str}
 """
+    # --- PROMPT FINALE AGGIORNATO CON ISTRUZIONI DETTAGLIATE PER IL ML ---
     prompt_to_llm_rep = f"""
-Sei un consulente esperto di data privacy e protezione dati (GDPR).
+Sei un consulente esperto di data privacy e protezione dati (GDPR), con una specializzazione nell'applicazione al Machine Learning.
 Di seguito trovi un **contesto sintetico** derivante dall'analisi di un dataset CSV:
 {context_summary_rep}
 
-Tuo compito: genera un **Report di Valutazione Privacy** in Markdown. Il report deve essere chiaro, conciso e orientato all'azione, considerando l'utilità dei dati per il Machine Learning.
+Tuo compito: genera un **Report di Valutazione Privacy** in Markdown. Il report deve essere chiaro, conciso e orientato all'azione, considerando **l'utilità dei dati per il Machine Learning**.
 Struttura il report nelle seguenti sezioni principali (usa ESATTAMENTE questi titoli):
+
 1. **Sintesi Esecutiva e Livello di Rischio Complessivo**
-   (Valuta il livello di rischio generale del dataset: Basso, Medio, Alto, Molto Alto. Riassumi le principali scoperte, includendo l'impatto della perdita di utilità stimata se rilevante.)
+   (Valuta il livello di rischio generale del dataset: Basso, Medio, Alto, Molto Alto. Riassumi le principali scoperte, includendo l'impatto della perdita di utilità stimata se rilevante per il ML.)
+
 2. **Tabella delle Metriche di Re-identificazione**
    (Presenta una tabella Markdown con le metriche calcolate: k-anonymity (minimo k e record singoli), e l-diversity per ciascun SA. Indica valore osservato, soglia consigliata (es. k>=5, l>=2), e un commento sull'esito: ✅ OK, ⚠️ Attenzione!, 🛑 Rischio Alto!, N/D.)
+
 3. **Analisi dei Rischi di Re-identificazione e Sensibilità dei Dati**
-   (Commenta i risultati delle metriche e la natura delle PII/colonne sensibili. Discuti il trade-off privacy/utilità alla luce della perdita di varianza stimata.)
+   (Commenta i risultati delle metriche. Spiega in modo chiaro e specifico il rischio derivante dalla combinazione dei Quasi-Identificatori (QID). **Approfondisci il trade-off privacy/utilità per il Machine Learning**: come le tecniche di anonimizzazione applicate (es. generalizzazione, hashing) impattano la qualità delle feature? Ad esempio, la generalizzazione di una variabile numerica ne riduce la precisione, potenzialmente influenzando modelli di regressione. L'hashing di un QID lo rende invece utilizzabile solo per confronti di uguaglianza, ma non per modelli che sfruttano pattern lessicali.)
+
 4. **Principali Rischi Legali, Operativi e Reputazionali**
-   (Elenca 2-4 rischi chiave (GDPR).)
+   (Elenca 2-4 rischi chiave (GDPR), considerando anche i rischi legati all'uso di dati non correttamente anonimizzati in sistemi di ML.)
+
 5. **Azioni Correttive e Raccomandazioni Prioritarie**
-   (Elenca azioni concrete: anonimizzazione (considerando i metodi applicati e la loro efficacia/impatto sull'utilità), miglioramento metriche, controlli organizzativi, DPIA.)
+   (Elenca azioni concrete: anonimizzazione (considerando i metodi applicati e il loro impatto sull'utilità ML), miglioramento metriche, controlli organizzativi, DPIA.)
 
 Non inserire commenti vuoti. Sii analitico, basandoti sul contesto.
 """
@@ -669,7 +715,7 @@ Non inserire commenti vuoti. Sii analitico, basandoti sul contesto.
         return f"### Valutazione Privacy – Parziale (Analisi LLM non eseguita)\n\n**Contesto disponibile per valutazione manuale:**\n```text\n{context_summary_rep.strip()}\n```\n\nL'analisi dettagliata e le raccomandazioni richiederebbero un modello LLM."
     try:
         response = openai.ChatCompletion.create(model=model_api_id, messages=[{"role": "system",
-                                                                               "content": "Sei un consulente esperto di data privacy (GDPR). Genera un report Markdown strutturato e con raccomandazioni chiare, basato sul contesto fornito. Usa i titoli di sezione richiesti."},
+                                                                               "content": "Sei un consulente esperto di data privacy (GDPR) e Machine Learning. Genera un report Markdown strutturato e con raccomandazioni chiare, basato sul contesto fornito. Usa i titoli di sezione richiesti."},
                                                                               {"role": "user",
                                                                                "content": prompt_to_llm_rep.strip()}],
                                                 temperature=0.2, max_tokens=2500)
