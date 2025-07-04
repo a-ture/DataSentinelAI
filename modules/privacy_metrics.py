@@ -17,8 +17,6 @@ def calculate_k_anonymity(df: pd.DataFrame, qid_cols: List[str]) -> Tuple[Union[
         return float('inf'), 0
 
     try:
-        # Assicura che tutte le colonne QID siano stringhe per un groupby consistente
-        # Questo può essere lento su df grandi, considera di farlo una volta prima se possibile
         for col in qid_cols:
             if df_qid_dropped[col].dtype != 'object':
                 df_qid_dropped[col] = df_qid_dropped[col].astype(str)

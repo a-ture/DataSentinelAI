@@ -1,4 +1,4 @@
-\       import asyncio
+import asyncio
 import hashlib
 import json
 import re
@@ -165,7 +165,7 @@ def _infer_parse_dates(df: pd.DataFrame, threshold: float = 0.7) -> Tuple[pd.Dat
     return df_copy, inferred_datetime_col_names
 
 
-# --- Funzione _inspect_column_async_text AGGIORNATA ---
+
 async def _inspect_column_async_text(
         col_name: str,
         sample_preview_for_llm: str,
@@ -178,7 +178,7 @@ async def _inspect_column_async_text(
 
     valid_text_methods_for_prompt = ", ".join([f'"{m}"' for m in LLM_TEXT_ANON_METHODS])
 
-    # --- PROMPT CORRETTO E AGGIORNATO ---
+
     prompt_unificato = f"""
 Analizza la colonna CSV testuale chiamata "{col_name}", i cui valori di esempio sono:
 "{sample_preview_for_llm}".
@@ -409,7 +409,7 @@ async def _analyze_text_columns_llm(
         elif final_applied_method_txt == "truncate":
             df_out_text_anonymized[col_name_res_txt] = current_col_data_for_anon_txt.astype(str).str.slice(0,
                                                                                                            10) + "..."
-        # AGGIUNTA la logica per il nuovo metodo 'redact_pii'
+
         elif final_applied_method_txt == "redact_pii":
             df_out_text_anonymized[col_name_res_txt] = current_col_data_for_anon_txt.astype(str).apply(
                 _redact_text_with_ner)
@@ -684,7 +684,7 @@ Metriche Rischio Re-identificazione (soglie indicative: k>=5, l>=2, record singo
 Stima Perdita di Utilità (Varianza Preservata dopo generalizzazione, per colonne numeriche di esempio):
 - {loss_info_summary_str}
 """
-    # --- PROMPT FINALE AGGIORNATO CON ISTRUZIONI DETTAGLIATE PER IL ML ---
+
     prompt_to_llm_rep = f"""
 Sei un consulente esperto di data privacy e protezione dati (GDPR), con una specializzazione nell'applicazione al Machine Learning.
 Di seguito trovi un **contesto sintetico** derivante dall'analisi di un dataset CSV:

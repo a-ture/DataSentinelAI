@@ -123,7 +123,6 @@ def redact_pdf_in_memory(pdf_bytes: bytes, sensitive_terms: Dict[str, str],
         return pdf_bytes
 
 
-
 def _prepare_sensitive_terms_for_pdf_redaction(reports_text_state: Optional[Dict[str, Any]], _) -> Dict[str, str]:
     """
     Estrae e prepara i termini sensibili per la redazione del PDF, applicando controlli robusti.
@@ -137,7 +136,7 @@ def _prepare_sensitive_terms_for_pdf_redaction(reports_text_state: Optional[Dict
     }
 
     if reports_text_state:
-        # --- PATCH DI SICUREZZA APPLICATO QUI ---
+
         for model_name, model_report in reports_text_state.items():
             # 1) Salto subito tutto ciò che non è dict
             if not isinstance(model_report, dict):
@@ -186,6 +185,7 @@ def chunk_text(text: str, max_chars: int = 3000) -> list[str]:
         chunks.append(" ".join(curr))
     return chunks
 
+
 # --- _perform_text_analysis AGGIORNATA (SENZA CHUNKING INTERNO) ---
 def _perform_text_analysis(text_to_analyze: str):
     logger_streamlit.info(f"Avvio _perform_text_analysis su testo di lunghezza {len(text_to_analyze)}.")
@@ -223,7 +223,6 @@ def _perform_text_analysis(text_to_analyze: str):
     st.session_state["reports_text"] = reports_text_single_model_results
     st.success("✅ Analisi PII su testo completo terminata!")
     logger_streamlit.info("_perform_text_analysis (chunked) completata.")
-
 
 
 def _perform_csv_analysis(df_to_analyze_full: pd.DataFrame, selected_model_name: Optional[str], num_bins: int,
@@ -492,8 +491,6 @@ if uploaded_file_obj is not None:
             st.caption("Anteprima dataset CSV (prime 5 righe):")
             st.dataframe(st.session_state.original_csv_df.head(5), use_container_width=True, height=200)
 
-
-
 if input_changed_flag_global:
     keys_to_reset = [
         "reports_text", "csv_analysis_report_df", "csv_anon_df", "overall_csv_comment",
@@ -524,7 +521,6 @@ if active_file_type_input == ".csv" and active_df_input is not None and not acti
         else:
             st.caption("Nessun modello LLM configurato; l'analisi delle colonne testuali non userà LLM.")
             st.session_state["selected_csv_model_name"] = None
-
 
 st.subheader("2. Analizza i dati")
 analysis_btn_disabled_status = not (

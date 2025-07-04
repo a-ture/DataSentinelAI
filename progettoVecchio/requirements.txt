@@ -1,8 +1,0 @@
-streamlit==1.37.1
-streamlit-scrollable-textbox==0.0.3
-PyPDF2==2.10.5
-fpdf2==2.8.2
-python-docx==1.1.2
-gliner==0.2.15
-transformers==4.48.0
-openai==1.52.1

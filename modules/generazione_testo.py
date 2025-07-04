@@ -15,9 +15,14 @@ from gliner import GLiNER  # Mantieni se usato da get_ner_pipelines
 from torch import cuda  # Mantieni se usato da get_ner_pipelines
 from transformers import pipeline, BertTokenizerFast, BertForTokenClassification, AutoTokenizer, \
     AutoModelForTokenClassification  # Mantieni se usato da get_ner_pipelines
+from typing import Union
+import json
+import openai
+import logging
 
-# Configurazione del Logger per questo modulo
 logger = logging.getLogger(__name__)
+# Configurazione del Logger per questo modulo
+
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -371,26 +376,10 @@ def generate_report_on_full_text(text: str, model_api_id: str) -> Dict[str, Any]
     return final_report
 
 
-from typing import Any, Union
-import json
-import openai
-import logging
 
-logger = logging.getLogger(__name__)
 
-from typing import Union
-import json
-import openai
-import logging
 
-logger = logging.getLogger(__name__)
 
-from typing import Union
-import json
-import openai
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 def edit_document(text: str,

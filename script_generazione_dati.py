@@ -219,4 +219,3 @@ if __name__ == "__main__":
 
     print("Generazione dati sintetici completata.")
     print(f"Controlla i file generati (con 'realistico' nel nome) nella cartella '{NOME_CARTELLA_OUTPUT}'.")
-
